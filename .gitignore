@@ -1,0 +1,16 @@
+# secrets
+.env
+
+# OS
+.DS_Store
+
+# node
+node_modules/
+
+# runtime data
+data/*.json
+data/*.log
+
+# ssh keys
+ssh/
+*.pem
