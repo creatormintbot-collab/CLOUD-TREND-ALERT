@@ -1,240 +1,288 @@
-import fs from "fs";
-import path from "path";
-import { ENV } from "../config/env.js";
-import { utcDateKey, clamp } from "../config/constants.js";
-import { computeCoreIndicators, entryRule } from "../strategy/intradayPro.js";
-import { advancedScores, baseScore, finalScore } from "../strategy/scoring.js";
-import { buildEntryCard } from "../bot/ui/entryCard.js";
-import { sendToAllowedChats } from "../bot/telegram.js";
-import { rankCandidates, pickTopToSend } from "../selection/selector.js";
-import { macroAdj, macroAltStrength, macroBTCTrend, macroBias } from "../strategy/macro.js";
-import { findRunningPosition, savePositions } from "../positions/store.js";
+import { evaluateEntryLocked } from "../strategy/entryRules.js";
+import { computeLevelsLocked } from "../strategy/levels.js";
+import { computeScore } from "../selection/scoring.js";
+import { rankCandidates } from "../selection/ranker.js";
+import { macroContextProxy } from "../selection/macro.js";
 
-const DATA_DIR = path.resolve(process.cwd(), "data");
-const STATE_PATH = path.join(DATA_DIR, "state.json");
-const SIGNAL_DIR = path.join(DATA_DIR, "signals");
+export class Scanner {
+  constructor({ env, logger, binance, candleStore, positionStore, bot, cardBuilder }) {
+    this.env = env;
+    this.log = logger;
+    this.binance = binance;
+    this.candles = candleStore;
+    this.store = positionStore;
+    this.bot = bot;
+    this.card = cardBuilder;
 
-function ensureData() {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.mkdirSync(SIGNAL_DIR, { recursive: true });
-  if (!fs.existsSync(STATE_PATH)) fs.writeFileSync(STATE_PATH, JSON.stringify({ cooldown: {}, lastDir: {}, lastCandle: {} }, null, 2));
-}
+    this.universe = this.store.getUniverse();
+    this.macro = { btc4h: [], alt4h: [], ctx: { bias: "NEUTRAL" } };
 
-function loadState() {
-  ensureData();
-  try { return JSON.parse(fs.readFileSync(STATE_PATH, "utf8")); } catch { return { cooldown: {}, lastDir: {}, lastCandle: {} }; }
-}
-
-function saveState(s) {
-  ensureData();
-  fs.writeFileSync(STATE_PATH, JSON.stringify(s, null, 2));
-}
-
-function signalsPathUTC(dateKey) {
-  return path.join(SIGNAL_DIR, `signals-${dateKey}.json`);
-}
-
-function appendDailySignalUTC(signal) {
-  ensureData();
-  const dk = utcDateKey(new Date());
-  const p = signalsPathUTC(dk);
-  const arr = fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, "utf8")) : [];
-  arr.push(signal);
-  fs.writeFileSync(p, JSON.stringify(arr, null, 2));
-}
-
-function computeLevels({ direction, entryMid, atr }) {
-  const zoneSize = atr * ENV.ZONE_ATR_MULT;
-  const entryZoneLow = entryMid - zoneSize;
-  const entryZoneHigh = entryMid + zoneSize;
-
-  const slDist = atr * ENV.SL_ATR_MULT;
-
-  const sl = direction === "LONG" ? entryMid - slDist : entryMid + slDist;
-  const tp1 = direction === "LONG" ? entryMid + slDist * 1.0 : entryMid - slDist * 1.0;
-  const tp2 = direction === "LONG" ? entryMid + slDist * 1.5 : entryMid - slDist * 1.5;
-  const tp3 = direction === "LONG" ? entryMid + slDist * 2.0 : entryMid - slDist * 2.0;
-
-  return { entryZoneLow, entryZoneHigh, entryMid, sl, tp1, tp2, tp3, slDist };
-}
-
-export function createScannerJob({ candleStore, universeManager, positions, macroFeed }) {
-  const state = loadState();
-
-  function cooldownKey(symbol, tf) { return `${symbol}__${tf}`; }
-  function dirKey(symbol, tf) { return `${symbol}__${tf}`; }
-  function candleKey(symbol, tf) { return `${symbol}__${tf}`; }
-
-  function inCooldown(symbol, tf, closedOpenTime) {
-    const key = cooldownKey(symbol, tf);
-    const cd = state.cooldown[key];
-    if (!cd) return false;
-    return closedOpenTime <= cd.untilOpenTime;
+    // alt basket proxy
+    this.altBasketSymbols = ["ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"];
   }
 
-  function setCooldown(symbol, tf, closedOpenTime) {
-    // cooldown 12 candles => until openTime of (current + 12*tf)
-    const key = cooldownKey(symbol, tf);
-    const minutes = candleStore.expectedCandleMs(tf);
-    const until = closedOpenTime + minutes * ENV.COOLDOWN_CANDLES;
-    state.cooldown[key] = { untilOpenTime: until };
+  getUniverse() {
+    return this.universe;
   }
 
-  function lastDirection(symbol, tf) {
-    return state.lastDir[dirKey(symbol, tf)] || null;
+  async initUniverse() {
+    if (this.universe?.length) return;
+    const syms = await this.binance.topPerpByVolume(this.env.TOP_VOLUME_N);
+    this.universe = syms;
+    this.store.setUniverse(syms);
   }
 
-  function setLastDirection(symbol, tf, dir) {
-    state.lastDir[dirKey(symbol, tf)] = dir;
-  }
-
-  function seenThisCandle(symbol, tf, openTime) {
-    return state.lastCandle[candleKey(symbol, tf)] === openTime;
-  }
-
-  function markCandle(symbol, tf, openTime) {
-    state.lastCandle[candleKey(symbol, tf)] = openTime;
-  }
-
-  async function evaluateSymbolTF(symbol, tf) {
-    const candles = candleStore.get(symbol, tf);
-    if (!candles || candles.length < ENV.BACKFILL_CANDLES - 5) return null;
-
-    const last = candles[candles.length - 1];
-    const ind = computeCoreIndicators(candles);
-    const rule = entryRule({ candles, ind });
-    if (!rule.ok) return null;
-
-    if (inCooldown(symbol, tf, last.openTime)) return null;
-
-    // State-change only: entry hanya saat arah berubah
-    const prevDir = lastDirection(symbol, tf);
-    if (prevDir && prevDir === rule.direction) return null;
-
-    // Jangan kirim entry jika sudah ada posisi RUNNING symbol+tf
-    if (findRunningPosition(positions, symbol, tf)) return null;
-
-    const entryMid = last.close; // candle just closed
-    const lv = computeLevels({ direction: rule.direction, entryMid, atr: ind.atr });
-    const base = baseScore({ ind, candles });
-    const adv = advancedScores({ candles, entryMid, atr: ind.atr, direction: rule.direction });
-
-    // macro context from macroFeed snapshot (stable TF = ENV.MACRO_TF)
-    const macro = macroFeed?.snapshot || { tf: ENV.MACRO_TF, btcTrend: "FLAT", altStrength: "FLAT", bias: "NEUTRAL", adj: 0 };
-    const adj = macroAdj({ bias: macro.bias, direction: rule.direction });
-
-    const score = finalScore({ base, adv, macroAdj: adj });
-
-    const analysisLines = [];
-    analysisLines.push(`EMA mid vs slow: ${ind.emaMid > ind.emaSlow ? "Bullish" : "Bearish"}`);
-    analysisLines.push(`Pullback touch EMA${ENV.EMA_FAST}: YES`);
-    if (adv.fvg?.fvg) {
-      analysisLines.push(`FVG ${adv.fvg.fvg.type}: ${adv.fvg.fvg.low} – ${adv.fvg.fvg.high} (${adv.fvg.proximity.label})`);
-    } else {
-      analysisLines.push(`FVG: none`);
+  async backfillAllPrimary() {
+    const tfs = this.env.SCAN_TIMEFRAMES;
+    for (const sym of this.universe) {
+      for (const tf of tfs) {
+        if (this.candles.hasMin(sym, tf, 300)) continue;
+        const rows = await this.binance.backfillKlines(sym, tf, 300);
+        this.candles.set(sym, tf, rows);
+      }
     }
-    if (adv.macd) {
-      analysisLines.push(`MACD: hist ${adv.macd.aligned ? "aligned" : "not aligned"} (${adv.macd.strengthening ? "strengthening" : "flat"})`);
-    } else {
-      analysisLines.push(`MACD: n/a`);
-    }
-    if (adv.volRatio != null) analysisLines.push(`Volume Ratio: ${adv.volRatio.toFixed(2)}x`);
-    analysisLines.push(`ATR%: ${ind.atrPct.toFixed(2)} | ADX: ${ind.adx.toFixed(1)} | RSI: ${ind.rsi.toFixed(1)}`);
+    this.log.info("Backfill primary done");
+  }
 
-    return {
-      symbol,
-      timeframe: tf,
-      direction: rule.direction,
+  async backfillMacro() {
+    // BTC 4h
+    const tf = this.env.SECONDARY_TIMEFRAME;
+    const btc = await this.binance.backfillKlines("BTCUSDT", tf, 300);
+    this.macro.btc4h = btc;
+
+    // alt basket: proxy by average candle close of basket (build synthetic series)
+    const altSeries = [];
+    for (const s of this.altBasketSymbols) {
+      const rows = await this.binance.backfillKlines(s, tf, 300);
+      altSeries.push(rows);
+    }
+    const len = Math.min(...altSeries.map((x) => x.length));
+    const synth = [];
+    for (let i = 0; i < len; i++) {
+      const close = altSeries.reduce((acc, arr) => acc + arr[i].close, 0) / altSeries.length;
+      synth.push({ ...altSeries[0][i], close });
+    }
+    this.macro.alt4h = synth;
+    this.macro.ctx = macroContextProxy({ btc4h: this.macro.btc4h, altBasket4h: this.macro.alt4h });
+    this.log.info({ macro: this.macro.ctx }, "Macro backfilled");
+  }
+
+  async startAutoWs() {
+    await this.binance.subscribeKlines({
+      symbols: this.universe,
+      tfs: this.env.SCAN_TIMEFRAMES,
+      onKlineClosed: async ({ symbol, timeframe, candle }) => {
+        this.candles.upsert(symbol, timeframe, candle);
+
+        // AUTO scanning entry on close
+        await this._evaluateAndMaybeSend({ symbol, timeframe, manualRequest: false });
+      }
+    });
+  }
+
+  async _evaluateAndMaybeSend({ symbol, timeframe, manualRequest }) {
+    // daily cap for AUTO only (on-demand can still produce NO SIGNAL)
+    if (!manualRequest && this.store.dailyLimitReached()) return;
+
+    const candles = this.candles.get(symbol, timeframe);
+    const evalRes = evaluateEntryLocked({ candles, env: this.env });
+    if (!evalRes.ok) return;
+
+    const direction = evalRes.direction;
+
+    if (!this.store.canSendSignal({ symbol, timeframe, direction })) return;
+
+    const entryMid = candles[candles.length - 1].close; // LOCKED: close candle CLOSED
+    const levels = computeLevelsLocked({
       entryMid,
-      levels: lv,
-      ind,
-      base,
-      adv,
-      macro: { ...macro, adj },
-      score,
-      analysisLines,
-      candleOpenTime: last.openTime,
-    };
-  }
+      atr14: evalRes.indicators.atr14,
+      direction,
+      env: this.env
+    });
 
-  async function onCandleClosed({ symbol, tf, candle }) {
-    // gate: ensure we only run once per closed candle (avoid duplicate close events)
-    if (seenThisCandle(symbol, tf, candle.openTime)) return;
-    markCandle(symbol, tf, candle.openTime);
+    const macro = this.macro.ctx;
+    const score = computeScore({
+      candles,
+      indicators: evalRes.indicators,
+      direction,
+      macroBias: macro.bias
+    });
 
-    const universe = await universeManager.refreshIfNeeded(false);
-    if (!universe.includes(symbol)) return;
-
-    // On each close event, we can scan universe for this TF (pro-style)
-    const tfToScan = tf;
-
-    const candidates = [];
-    for (const sym of universe) {
-      const c = await evaluateSymbolTF(sym, tfToScan);
-      if (c) candidates.push(c);
-    }
-
-    if (!candidates.length) {
-      saveState(state);
+    // 4h rule: send only if score >= 75 (secondary only)
+    if (timeframe === this.env.SECONDARY_TIMEFRAME && score.finalScore < this.env.SECONDARY_MIN_SCORE) {
       return;
     }
 
-    const shortlist = rankCandidates(candidates, 10);
-    let toSend = pickTopToSend(shortlist, ENV.MAX_SIGNALS_PER_TF_PER_CANDLE);
+    const signal = {
+      symbol,
+      timeframe,
+      direction,
+      ...levels,
+      score,
+      macro,
+      createdAt: Date.now()
+    };
 
-    // TF 4h: only send if score >= threshold
-    if (tfToScan === ENV.SECONDARY_TIMEFRAME) {
-      toSend = toSend.filter((x) => x.score >= ENV.SECONDARY_MIN_SCORE);
-    }
+    // persist + open position
+    const pos = {
+      symbol,
+      timeframe,
+      direction,
+      entryZoneLow: levels.entryZoneLow,
+      entryZoneHigh: levels.entryZoneHigh,
+      entryMid: levels.entryMid,
+      sl: levels.sl,
+      tp1: levels.tp1,
+      tp2: levels.tp2,
+      tp3: levels.tp3,
+      tp1Hit: false,
+      tp2Hit: false,
+      tp3Hit: false,
+      status: "RUNNING",
+      openedAt: Date.now()
+    };
 
-    for (const sig of toSend) {
-      const { html, buttons } = buildEntryCard(sig);
+    const chatId = this._autoTargetChatId();
+    if (!chatId) return;
 
-      await sendToAllowedChats({ html, buttons });
+    await this.bot.sendMessage(chatId, this.card.entryCard({ signal }), {
+      parse_mode: "HTML",
+      disable_web_page_preview: true
+    });
 
-      // persist signal
-      appendDailySignalUTC({
-        ts: Date.now(),
-        symbol: sig.symbol,
-        timeframe: sig.timeframe,
-        direction: sig.direction,
-        score: sig.score,
-        entryMid: sig.entryMid,
-        entryZoneLow: sig.levels.entryZoneLow,
-        entryZoneHigh: sig.levels.entryZoneHigh,
-        macro: sig.macro,
-      });
+    this.store.markSignalSent({ symbol, timeframe, direction });
+    this.store.appendSignalAudit({ ...signal, manualRequest });
+    this.store.upsertPosition(pos);
 
-      // create & persist position object (RUNNING)
-      const pos = {
-        symbol: sig.symbol,
-        timeframe: sig.timeframe,
-        direction: sig.direction,
-        entryZoneLow: sig.levels.entryZoneLow,
-        entryZoneHigh: sig.levels.entryZoneHigh,
-        entryMid: sig.levels.entryMid,
-        sl: sig.levels.sl,
-        tp1: sig.levels.tp1,
-        tp2: sig.levels.tp2,
-        tp3: sig.levels.tp3,
-        tp1Hit: false,
-        tp2Hit: false,
-        tp3Hit: false,
-        status: "RUNNING",
-        openedAt: Date.now(),
-        slDist: sig.levels.slDist,
-        emaMidAtEntry: sig.ind.emaMid,
-      };
-      positions.push(pos);
-      savePositions(positions);
-
-      // set anti-spam state
-      setLastDirection(sig.symbol, sig.timeframe, sig.direction);
-      setCooldown(sig.symbol, sig.timeframe, sig.candleOpenTime);
-    }
-
-    saveState(state);
+    this.log.info({ symbol, timeframe, direction, score: score.finalScore, manualRequest }, "SIGNAL sent & position opened");
   }
 
-  return { onCandleClosed };
+  _autoTargetChatId() {
+    // if TEST_SIGNALS_CHAT_ID is set, send only there
+    if (this.env.TEST_SIGNALS_CHAT_ID) return this.env.TEST_SIGNALS_CHAT_ID;
+    // else: if ALLOWED_GROUP_IDS exists, send to first as default
+    if (this.env.ALLOWED_GROUP_IDS?.length) return this.env.ALLOWED_GROUP_IDS[0];
+    if (this.env.TELEGRAM_CHAT_ID) return this.env.TELEGRAM_CHAT_ID;
+    return null;
+  }
+
+  async scanOnDemand({ symbol, timeframe, chatId }) {
+    // timeframe null => scan all primary & pick best 1-3
+    const tfs = timeframe ? [timeframe] : this.env.SCAN_TIMEFRAMES;
+
+    let symbols = [];
+    if (symbol) {
+      symbols = [symbol.endsWith("USDT") ? symbol : `${symbol}USDT`];
+    } else {
+      symbols = this.universe.slice(0, this.env.TOP_VOLUME_N);
+    }
+
+    // ensure backfill for requested
+    for (const s of symbols) {
+      for (const tf of tfs) {
+        if (!this.candles.hasMin(s, tf, 300)) {
+          const rows = await this.binance.backfillKlines(s, tf, 300);
+          this.candles.set(s, tf, rows);
+        }
+      }
+    }
+
+    const candidates = [];
+
+    for (const s of symbols) {
+      for (const tf of tfs) {
+        const candles = this.candles.get(s, tf);
+        const evalRes = evaluateEntryLocked({ candles, env: this.env });
+        if (!evalRes.ok) continue;
+
+        const direction = evalRes.direction;
+
+        if (!this.store.canSendSignal({ symbol: s, timeframe: tf, direction })) {
+          continue;
+        }
+
+        const entryMid = candles[candles.length - 1].close;
+        const levels = computeLevelsLocked({
+          entryMid,
+          atr14: evalRes.indicators.atr14,
+          direction,
+          env: this.env
+        });
+
+        const macro = this.macro.ctx;
+        const score = computeScore({
+          candles,
+          indicators: evalRes.indicators,
+          direction,
+          macroBias: macro.bias
+        });
+
+        if (tf === this.env.SECONDARY_TIMEFRAME && score.finalScore < this.env.SECONDARY_MIN_SCORE) {
+          continue;
+        }
+
+        candidates.push({
+          symbol: s,
+          timeframe: tf,
+          direction,
+          levels,
+          score,
+          macro,
+          indicators: evalRes.indicators
+        });
+      }
+    }
+
+    if (!candidates.length) {
+      return {
+        ok: false,
+        reasons: [
+          "No valid setup found (LOCKED entry rules)",
+          "Or cooldown active",
+          "Or insufficient data"
+        ]
+      };
+    }
+
+    const top = rankCandidates(candidates, 1)[0];
+
+    const signal = {
+      symbol: top.symbol,
+      timeframe: top.timeframe,
+      direction: top.direction,
+      ...top.levels,
+      score: top.score,
+      macro: top.macro,
+      createdAt: Date.now()
+    };
+
+    // open position + persist (on-demand also opens lifecycle tracking)
+    const pos = {
+      symbol: signal.symbol,
+      timeframe: signal.timeframe,
+      direction: signal.direction,
+      entryZoneLow: signal.entryZoneLow,
+      entryZoneHigh: signal.entryZoneHigh,
+      entryMid: signal.entryMid,
+      sl: signal.sl,
+      tp1: signal.tp1,
+      tp2: signal.tp2,
+      tp3: signal.tp3,
+      tp1Hit: false,
+      tp2Hit: false,
+      tp3Hit: false,
+      status: "RUNNING",
+      openedAt: Date.now()
+    };
+
+    this.store.markSignalSent({
+      symbol: signal.symbol,
+      timeframe: signal.timeframe,
+      direction: signal.direction
+    });
+    this.store.appendSignalAudit({ ...signal, manualRequest: true, requestedByChat: chatId });
+    this.store.upsertPosition(pos);
+
+    return { ok: true, signal };
+  }
 }

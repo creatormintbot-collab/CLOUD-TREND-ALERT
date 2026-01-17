@@ -1,39 +1,78 @@
-// Minimal ADX (Wilder style, simplified rolling on last N)
-export function adx(candles, length = 14) {
-  if (!candles || candles.length < length + 2) return null;
+export function adx(candles, period = 14) {
+  if (candles.length < period * 2 + 1) return null;
 
-  const start = candles.length - (length + 1);
-  let trSum = 0;
-  let plusDMSum = 0;
-  let minusDMSum = 0;
+  // Wilder's smoothing (simplified, stable enough for locked gate ADX>=18)
+  const n = candles.length;
 
-  for (let i = start + 1; i < candles.length; i++) {
-    const cur = candles[i];
+  let plusDM = [];
+  let minusDM = [];
+  let trArr = [];
+
+  for (let i = 1; i < n; i++) {
+    const curr = candles[i];
     const prev = candles[i - 1];
 
-    const upMove = cur.high - prev.high;
-    const downMove = prev.low - cur.low;
+    const upMove = curr.high - prev.high;
+    const downMove = prev.low - curr.low;
 
-    const plusDM = upMove > downMove && upMove > 0 ? upMove : 0;
-    const minusDM = downMove > upMove && downMove > 0 ? downMove : 0;
+    plusDM.push(upMove > downMove && upMove > 0 ? upMove : 0);
+    minusDM.push(downMove > upMove && downMove > 0 ? downMove : 0);
 
     const tr = Math.max(
-      cur.high - cur.low,
-      Math.abs(cur.high - prev.close),
-      Math.abs(cur.low - prev.close)
+      curr.high - curr.low,
+      Math.abs(curr.high - prev.close),
+      Math.abs(curr.low - prev.close)
     );
-
-    trSum += tr;
-    plusDMSum += plusDM;
-    minusDMSum += minusDM;
+    trArr.push(tr);
   }
 
-  if (trSum === 0) return 0;
+  const smooth = (arr, p) => {
+    let out = [];
+    let first = 0;
+    for (let i = 0; i < p; i++) first += arr[i];
+    out[p - 1] = first;
+    for (let i = p; i < arr.length; i++) {
+      out[i] = out[i - 1] - out[i - 1] / p + arr[i];
+    }
+    return out;
+  };
 
-  const plusDI = (plusDMSum / trSum) * 100;
-  const minusDI = (minusDMSum / trSum) * 100;
-  const dx = (Math.abs(plusDI - minusDI) / (plusDI + minusDI || 1)) * 100;
+  const smTR = smooth(trArr, period);
+  const smPlus = smooth(plusDM, period);
+  const smMinus = smooth(minusDM, period);
 
-  // For MVP: return DX as proxy ADX (reasonable for strength gating >=18)
-  return dx;
+  const diPlus = [];
+  const diMinus = [];
+  for (let i = period - 1; i < trArr.length; i++) {
+    const tr = smTR[i];
+    if (!tr) continue;
+    diPlus[i] = (100 * smPlus[i]) / tr;
+    diMinus[i] = (100 * smMinus[i]) / tr;
+  }
+
+  const dx = [];
+  for (let i = period - 1; i < trArr.length; i++) {
+    const p = diPlus[i] ?? 0;
+    const m = diMinus[i] ?? 0;
+    const denom = p + m;
+    dx[i] = denom === 0 ? 0 : (100 * Math.abs(p - m)) / denom;
+  }
+
+  // ADX smoothing
+  let adxVal = 0;
+  let count = 0;
+  for (let i = period - 1; i < period - 1 + period; i++) {
+    if (dx[i] === undefined) continue;
+    adxVal += dx[i];
+    count++;
+  }
+  if (!count) return null;
+  adxVal /= count;
+
+  for (let i = period - 1 + period; i < dx.length; i++) {
+    if (dx[i] === undefined) continue;
+    adxVal = (adxVal * (period - 1) + dx[i]) / period;
+  }
+
+  return adxVal;
 }

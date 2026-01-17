@@ -1,96 +1,36 @@
-import { TF_TO_MINUTES } from "../config/constants.js";
-
-function klineToCandle(k) {
-  return {
-    openTime: Number(k[0]),
-    open: Number(k[1]),
-    high: Number(k[2]),
-    low: Number(k[3]),
-    close: Number(k[4]),
-    volume: Number(k[5]),
-    closeTime: Number(k[6]),
-  };
-}
-
-export function createCandleStore() {
-  // store[symbol][tf] = candles[]
-  const store = new Map();
-  const listeners = new Set();
-
-  function key(symbol, tf) {
-    return `${symbol}__${tf}`;
+export class CandleStore {
+  constructor({ limit = 600, logger }) {
+    this.limit = limit;
+    this.log = logger;
+    // key: `${symbol}:${tf}` => candles[]
+    this.map = new Map();
   }
 
-  function get(symbol, tf) {
-    return store.get(key(symbol, tf)) || [];
+  key(symbol, tf) {
+    return `${symbol}:${tf}`;
   }
 
-  function set(symbol, tf, candles) {
-    store.set(key(symbol, tf), candles);
+  get(symbol, tf) {
+    return this.map.get(this.key(symbol, tf)) ?? [];
   }
 
-  function appendOrUpdate(symbol, tf, candle) {
-    const arr = get(symbol, tf);
-    const n = arr.length;
-    if (n && arr[n - 1].openTime === candle.openTime) {
-      arr[n - 1] = candle;
+  set(symbol, tf, candles) {
+    const trimmed = candles.slice(-this.limit);
+    this.map.set(this.key(symbol, tf), trimmed);
+  }
+
+  upsert(symbol, tf, candle) {
+    const k = this.key(symbol, tf);
+    const arr = this.map.get(k) ?? [];
+    if (arr.length && arr[arr.length - 1].openTime === candle.openTime) {
+      arr[arr.length - 1] = candle;
     } else {
       arr.push(candle);
     }
-    set(symbol, tf, arr);
+    this.map.set(k, arr.slice(-this.limit));
   }
 
-  function trim(symbol, tf, max = 1200) {
-    const arr = get(symbol, tf);
-    if (arr.length > max) {
-      set(symbol, tf, arr.slice(arr.length - max));
-    }
+  hasMin(symbol, tf, n = 300) {
+    return this.get(symbol, tf).length >= n;
   }
-
-  function onClose(listener) {
-    listeners.add(listener);
-    return () => listeners.delete(listener);
-  }
-
-  function emitClose(payload) {
-    for (const fn of listeners) {
-      try { fn(payload); } catch {}
-    }
-  }
-
-  function wsKlineToCandle(msg) {
-    // Binance combined stream: msg.data.k
-    const k = msg?.data?.k;
-    if (!k) return null;
-    return {
-      symbol: String(k.s),
-      tf: String(k.i),
-      isClosed: !!k.x,
-      candle: {
-        openTime: Number(k.t),
-        open: Number(k.o),
-        high: Number(k.h),
-        low: Number(k.l),
-        close: Number(k.c),
-        volume: Number(k.v),
-        closeTime: Number(k.T),
-      },
-    };
-  }
-
-  function expectedCandleMs(tf) {
-    return TF_TO_MINUTES[tf] * 60_000;
-  }
-
-  return {
-    get,
-    set,
-    appendOrUpdate,
-    trim,
-    onClose,
-    emitClose,
-    wsKlineToCandle,
-    expectedCandleMs,
-    klineToCandle,
-  };
 }

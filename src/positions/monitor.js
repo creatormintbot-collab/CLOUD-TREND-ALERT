@@ -1,54 +1,54 @@
-import { binanceRest } from "../exchange/rest.js";
-import { savePositions } from "./store.js";
+export function checkLifecycle({ position, markPrice, ema55, env }) {
+  // returns { events: [TP1|TP2|TP3|SL], updatedPosition }
+  const p = { ...position };
+  const dir = p.direction; // LONG/SHORT
+  const hit = (level) => {
+    if (dir === "LONG") return markPrice >= level;
+    return markPrice <= level;
+  };
+  const hitSL = () => {
+    if (dir === "LONG") return markPrice <= p.sl;
+    return markPrice >= p.sl;
+  };
 
-export async function pollAndUpdatePositions({ positions, onTP1, onTP2, onTP3, onSL }) {
-  const running = positions.filter((p) => p.status === "RUNNING");
-  if (!running.length) return;
+  const events = [];
 
-  // fetch prices sequentially for MVP (safe); can parallelize later
-  for (const p of running) {
-    const price = await binanceRest.price(p.symbol).catch(() => null);
-    if (!Number.isFinite(price)) continue;
+  if (p.status !== "RUNNING") return { events, updatedPosition: p };
 
-    const isLong = p.direction === "LONG";
-
-    const hitTP1 = isLong ? price >= p.tp1 : price <= p.tp1;
-    const hitTP2 = isLong ? price >= p.tp2 : price <= p.tp2;
-    const hitTP3 = isLong ? price >= p.tp3 : price <= p.tp3;
-    const hitSL = isLong ? price <= p.sl : price >= p.sl;
-
-    if (hitSL) {
-      p.status = "CLOSED";
-      p.closedReason = "SL";
-      p.closedPrice = price;
-      p.closedAt = Date.now();
-      await onSL?.(p, price);
-      continue;
-    }
-
-    if (hitTP3 && !p.tp3Hit) {
-      p.tp3Hit = true;
-      p.tp2Hit = true;
-      p.tp1Hit = true;
-      p.status = "CLOSED";
-      p.closedReason = "TP3";
-      p.closedPrice = price;
-      p.closedAt = Date.now();
-      await onTP3?.(p, price);
-      continue;
-    }
-
-    if (hitTP2 && !p.tp2Hit) {
-      p.tp2Hit = true;
-      p.tp1Hit = true;
-      await onTP2?.(p, price);
-    }
-
-    if (hitTP1 && !p.tp1Hit) {
-      p.tp1Hit = true;
-      await onTP1?.(p, price);
-    }
+  if (!p.tp1Hit && hit(p.tp1)) {
+    p.tp1Hit = true;
+    events.push({
+      type: "TP1",
+      action: ["Secure partial profit (30%)", "Move SL to BE"],
+      suggestedSL: p.entryMid
+    });
   }
 
-  savePositions(positions);
+  if (!p.tp2Hit && hit(p.tp2)) {
+    p.tp2Hit = true;
+    const sldist = Math.abs(p.entryMid - p.sl);
+    const suggested =
+      dir === "LONG"
+        ? Math.max(p.entryMid + 0.5 * sldist, ema55 ?? p.entryMid)
+        : Math.min(p.entryMid - 0.5 * sldist, ema55 ?? p.entryMid);
+
+    events.push({
+      type: "TP2",
+      action: ["Lock more profit (total 60%)", "Trail SL recommended"],
+      suggestedSL: suggested
+    });
+  }
+
+  if (!p.tp3Hit && hit(p.tp3)) {
+    p.tp3Hit = true;
+    p.status = "CLOSED";
+    events.push({ type: "TP3", action: ["Close 100%"], suggestedSL: null });
+  }
+
+  if (p.status === "RUNNING" && hitSL()) {
+    p.status = "CLOSED";
+    events.push({ type: "SL", action: ["Stop Loss hit"], suggestedSL: null });
+  }
+
+  return { events, updatedPosition: p };
 }

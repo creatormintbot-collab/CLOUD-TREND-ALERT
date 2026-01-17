@@ -1,16 +1,28 @@
-import { emaSeries } from "./ema.js";
+import { ema } from "./ema.js";
 
 export function macdHistogram(closes, fast = 12, slow = 26, signal = 9) {
-  if (!closes || closes.length < slow + signal + 5) return null;
+  if (closes.length < slow + signal + 5) return null;
 
-  const emaFast = emaSeries(closes, fast);
-  const emaSlow = emaSeries(closes, slow);
+  // build MACD series last ~ (signal+5) points
+  const macdSeries = [];
+  for (let i = slow; i <= closes.length; i++) {
+    const slice = closes.slice(0, i);
+    const eFast = ema(slice, fast);
+    const eSlow = ema(slice, slow);
+    if (eFast == null || eSlow == null) continue;
+    macdSeries.push(eFast - eSlow);
+  }
 
-  const macdLine = emaFast.map((v, i) => v - (emaSlow[i] ?? 0));
-  const signalLine = emaSeries(macdLine, signal);
-  const hist = macdLine.map((v, i) => v - (signalLine[i] ?? 0));
+  if (macdSeries.length < signal + 3) return null;
+  const sig = ema(macdSeries, signal);
+  if (sig == null) return null;
 
-  const last = hist[hist.length - 1];
-  const prev = hist[hist.length - 2] ?? 0;
-  return { hist: last, prevHist: prev, delta: last - prev };
+  const lastMacd = macdSeries[macdSeries.length - 1];
+  const hist = lastMacd - sig;
+
+  // strengthening: compare last 3 hist values
+  const h2 = macdSeries[macdSeries.length - 2] - ema(macdSeries.slice(0, -1), signal);
+  const h3 = macdSeries[macdSeries.length - 3] - ema(macdSeries.slice(0, -2), signal);
+
+  return { hist, prevHist: h2 ?? 0, prev2Hist: h3 ?? 0 };
 }

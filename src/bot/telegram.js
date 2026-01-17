@@ -1,51 +1,50 @@
-import { ENV } from "../config/env.js";
+import TelegramBot from "node-telegram-bot-api";
+import { helpText } from "./commands/help.js";
+import { topText } from "./commands/top.js";
+import { handleScanCommand } from "./commands/scan.js";
 
-async function tg(method, payload) {
-  const url = `https://api.telegram.org/bot${ENV.TELEGRAM_BOT_TOKEN}/${method}`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload),
+export function createTelegramBot({ env, logger, scanner }) {
+  const bot = new TelegramBot(env.TELEGRAM_BOT_TOKEN, { polling: true });
+
+  const isAllowed = (chatId) => {
+    if (env.ALLOWED_GROUP_IDS?.length) return env.ALLOWED_GROUP_IDS.includes(Number(chatId));
+    if (env.TELEGRAM_CHAT_ID) return String(chatId) === String(env.TELEGRAM_CHAT_ID);
+    return true;
+  };
+
+  bot.on("message", async (msg) => {
+    const chatId = msg.chat.id;
+    if (!isAllowed(chatId)) return;
+
+    // basic logging
+    if (msg.text?.startsWith("/")) {
+      logger.info({ chatId, text: msg.text }, "Telegram command");
+    }
   });
-  const j = await res.json().catch(() => null);
-  if (!res.ok || !j?.ok) {
-    throw new Error(`Telegram ${method} failed: ${JSON.stringify(j)}`);
-  }
-  return j.result;
-}
 
-function normalizeButtons(buttons) {
-  if (!buttons?.length) return undefined;
+  bot.onText(/^\/help\b/, async (msg) => {
+    if (!isAllowed(msg.chat.id)) return;
+    await bot.sendMessage(msg.chat.id, helpText(), { parse_mode: "HTML" });
+  });
 
-  const inline_keyboard = buttons.map((row) =>
-    row
-      .map((b) => {
-        const btn = { text: b.text };
-        if (b.url) btn.url = b.url;
-        if (b.callback_data) btn.callback_data = b.callback_data;
-        return btn;
-      })
-      .filter((b) => b?.text)
-  );
+  bot.onText(/^\/top\b/, async (msg) => {
+    if (!isAllowed(msg.chat.id)) return;
+    const u = scanner.getUniverse();
+    await bot.sendMessage(msg.chat.id, topText(u), { parse_mode: "HTML" });
+  });
 
-  return inline_keyboard.length ? { inline_keyboard } : undefined;
-}
-
-export async function sendToAllowedChats({ html, buttons }) {
-  const chatIds = ENV.ALLOWED_GROUP_IDS;
-  if (!chatIds.length) return;
-
-  const reply_markup = normalizeButtons(buttons);
-
-  for (const chat_id of chatIds) {
-    await tg("sendMessage", {
-      chat_id,
-      text: html ?? "",
-      parse_mode: "HTML",
-      disable_web_page_preview: true,
-      reply_markup,
-    }).catch((e) => {
-      console.error(`[TG] send failed chat=${chat_id}`, e.message);
+  bot.onText(/^\/scan(?:\s+(.+))?$/, async (msg, match) => {
+    if (!isAllowed(msg.chat.id)) return;
+    const raw = (match?.[1] ?? "").trim();
+    const args = raw ? raw.split(/\s+/) : [];
+    await handleScanCommand({
+      bot,
+      chatId: msg.chat.id,
+      args,
+      scanner,
+      logger
     });
-  }
+  });
+
+  return bot;
 }
