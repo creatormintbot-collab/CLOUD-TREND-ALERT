@@ -1,0 +1,13 @@
+# env
+.env
+
+# runtime data
+data/state.json
+data/positions.json
+data/signals/*.json
+
+# node
+node_modules/
+
+# os
+.DS_Store

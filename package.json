@@ -1,0 +1,13 @@
+{
+  "name": "cloud-trend-alert",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "CLOUD TREND ALERT - Binance USDT-M Futures AI Trading Assistant (scanner + lifecycle notifier)",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
