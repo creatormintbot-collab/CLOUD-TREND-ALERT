@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { TF_TO_MINUTES } from "./constants.js";
 
 function req(name, v) {
