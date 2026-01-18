@@ -1,3 +1,5 @@
+import "dotenv/config";
+
 export function loadEnv() {
   const get = (k, d = undefined) => (process.env[k] ?? d);
 
@@ -26,7 +28,9 @@ export function loadEnv() {
     NODE_ENV: get("NODE_ENV", "production"),
 
     TELEGRAM_BOT_TOKEN: get("TELEGRAM_BOT_TOKEN", ""),
-    ALLOWED_GROUP_IDS: csv(get("ALLOWED_GROUP_IDS", "")).map((x) => Number(x)),
+    ALLOWED_GROUP_IDS: csv(get("ALLOWED_GROUP_IDS", ""))
+      .map((x) => Number(x))
+      .filter((n) => Number.isFinite(n)),
     TELEGRAM_CHAT_ID: get("TELEGRAM_CHAT_ID", ""),
     TEST_SIGNALS_CHAT_ID: get("TEST_SIGNALS_CHAT_ID", ""),
 
@@ -48,7 +52,7 @@ export function loadEnv() {
 
     SCAN_TIMEFRAMES: csv(get("SCAN_TIMEFRAMES", "15m,30m,1h")),
     SECONDARY_TIMEFRAME: get("SECONDARY_TIMEFRAME", "4h"),
-    SECONDARY_MIN_SCORE: toInt(get("SECONDARY_MIN_SCORE"), 75),
+    SECONDARY_MIN_SCORE: toInt(get("SECONDARY_MIN_SCORE"), 80),
 
     MAX_SIGNALS_PER_DAY: toInt(get("MAX_SIGNALS_PER_DAY"), 5),
     COOLDOWN_MINUTES: toInt(get("COOLDOWN_MINUTES"), 45),
