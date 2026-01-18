@@ -33,8 +33,6 @@ function createBotStub(logger) {
 async function main() {
   const env = loadEnv();
 
-  // MINIMAL FIX: pino level must never be undefined (prevents crash on boot)
-  // NOTE: keep behavior the same; just add safe fallback
   const logLevel =
     String(env.LOG_LEVEL ?? process.env.LOG_LEVEL ?? process.env.PINO_LEVEL ?? "info").trim() || "info";
 
@@ -43,8 +41,7 @@ async function main() {
     base: { app: "cloud-trend-alert" }
   });
 
-  // MINIMAL FIX: ensure Binance REST base URL is not empty (prevents Invalid URL '/fapi/v1/klines')
-  // We populate BOTH env object + process.env because some exchange layers read either.
+  // Ensure Binance REST base URL is not empty
   const fapiBase = "https://fapi.binance.com";
   const baseKeys = [
     "BINANCE_FAPI_BASE_URL",
@@ -62,14 +59,16 @@ async function main() {
     if (!process.env[k]) process.env[k] = fapiBase;
   }
 
-  // MINIMAL FIX: daily recap env key compatibility (prevents "missing/invalid DAILY_RECAP_UTC" spam)
-  // Some parts use DAILY_RECAP_UTC while env loader may expose DAILY_RECAP_TIME_UTC.
+  // daily recap env compatibility
   if (!env.DAILY_RECAP_UTC && env.DAILY_RECAP_TIME_UTC) env.DAILY_RECAP_UTC = env.DAILY_RECAP_TIME_UTC;
   if (!env.DAILY_RECAP_TIME_UTC && env.DAILY_RECAP_UTC) env.DAILY_RECAP_TIME_UTC = env.DAILY_RECAP_UTC;
 
   const dataDir = path.join(__dirname, "..", "data");
   const positionStore = new PositionStore({ dataDir, logger, env });
-  const candleStore = new CandleStore({ limit: 650, logger });
+
+  // CandleStore is bounded; keep limit modest to reduce memory peak
+  const candleLimit = Number(env.CANDLE_LIMIT ?? 350);
+  const candleStore = new CandleStore({ limit: candleLimit, logger });
 
   const binance = new BinanceFutures(env, logger);
 
@@ -79,7 +78,6 @@ async function main() {
     bot = createTelegramBot({ env, logger, scanner: { getUniverse: () => positionStore.getUniverse() } });
     logger.info("Telegram bot started (polling)");
   } catch (e) {
-    // Never crash the whole service just because Telegram env is wrong.
     logger.warn({ err: String(e) }, "Telegram bot NOT started; using stub bot");
     bot = createBotStub(logger);
   }
@@ -95,10 +93,9 @@ async function main() {
     cardBuilder: Cards
   });
 
-  // rebind scanner into bot commands
   bot._scanner = scanner;
 
-  // Server (health/ready)
+  // Server (health)
   const server = createServer({
     env,
     logger,
@@ -111,17 +108,31 @@ async function main() {
           app: "cloud-trend-alert",
           ts: new Date(now).toISOString(),
           uptimeSec: Math.floor(process.uptime()),
-          positionsRunning: runningCount
+          positionsRunning: runningCount,
+          candleStats: candleStore?.stats?.()
         };
       }
     }
   });
 
-  // Bootstrap
+  // ====== BOOTSTRAP (SAFE MODE) ======
+  // Critical fix for OOM: disable heavy startup backfill by default.
+  // Enable ONLY if you want: BOOTSTRAP_BACKFILL=1
+  const doBackfill = String(env.BOOTSTRAP_BACKFILL ?? "").trim() === "1";
+
   await scanner.initUniverse();
-  await scanner.backfillMacro();
-  await scanner.backfillAllPrimary();
+
+  // Start WS ASAP so candles fill gradually without huge REST backfill memory peak
   await scanner.startAutoWs();
+
+  // Optional: backfill (can be heavy under REST 429 retry storms)
+  if (doBackfill) {
+    logger.warn("BOOTSTRAP_BACKFILL=1 enabled: running backfillMacro + backfillAllPrimary");
+    await scanner.backfillMacro();
+    await scanner.backfillAllPrimary();
+  } else {
+    logger.warn("BOOTSTRAP_BACKFILL disabled (default): skipping macro/primary backfill to prevent OOM");
+  }
 
   // Jobs
   const stopMonitor = startPriceMonitor({
@@ -157,7 +168,6 @@ async function main() {
 
     logger.warn({ sig }, "Graceful shutdown begin");
 
-    // Stop periodic jobs FIRST to avoid new work while shutting down
     try {
       stopMonitor?.();
       stopRecap?.();
@@ -166,25 +176,21 @@ async function main() {
       logger.warn({ err: String(e) }, "Error stopping jobs");
     }
 
-    // Close external resources
     try {
       await binance?.unsubscribeAll?.();
     } catch (e) {
       logger.warn({ err: String(e) }, "Error closing Binance subscriptions");
     }
 
-    // Persist state
     try {
       positionStore?.save?.();
     } catch (e) {
       logger.warn({ err: String(e) }, "Error saving PositionStore");
     }
 
-    // Stop polling and HTTP server
     try {
       await bot?.stopPolling?.();
     } catch (e) {
-      // stopPolling may throw if already stopped
       logger.warn({ err: String(e) }, "Error stopping Telegram polling");
     }
 
@@ -201,28 +207,16 @@ async function main() {
     process.exit(0);
   };
 
-  // Use .once to prevent duplicate handlers (important for PM2 restarts)
   process.once("SIGINT", () => shutdown("SIGINT"));
   process.once("SIGTERM", () => shutdown("SIGTERM"));
 
-  /**
-   * IMPORTANT:
-   * Commands (/scan, /top, /help) should be registered in ONE place only.
-   * We prefer src/bot/telegram.js as the single source of truth.
-   * This avoids duplicate handlers that can cause duplicated progress UI
-   * (e.g., "Finalizing data..." appearing twice).
-   *
-   * If you ever need the legacy binding from index.js (not recommended),
-   * you can enable it via env BIND_COMMANDS_IN_INDEX=1.
-   */
+  // Legacy command binding gate (keep as-is)
   const bindCommandsInIndex = String(env.BIND_COMMANDS_IN_INDEX ?? "").trim() === "1";
   if (bindCommandsInIndex) {
     logger.warn(
       "Binding Telegram commands from index.js (legacy mode) – ensure telegram.js does not also bind commands"
     );
 
-    // attach scanner to telegram handlers (legacy bridge)
-    // (node-telegram-bot-api doesn't support DI well without refactor)
     bot.onText(/^\/scan(?:\s+(.+))?$/, async (msg, match) => {
       const chatId = msg.chat.id;
       const raw = (match?.[1] ?? "").trim();

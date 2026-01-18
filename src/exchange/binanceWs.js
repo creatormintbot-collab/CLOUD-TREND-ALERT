@@ -66,8 +66,13 @@ export class BinanceWsGroup {
 
     if (this.ws) {
       try {
+        this.ws.removeAllListeners();
+      } catch {}
+
+      try {
         this.ws.close();
       } catch {}
+
       try {
         // Ensure it closes quickly
         this.ws.terminate();
@@ -122,6 +127,17 @@ export class BinanceWsGroup {
     const url = this.url();
     this.log?.info?.({ name: this.name, streams: this.streams.length }, "WS connect");
 
+    // If there is a stale ws object, hard cleanup before creating a new one
+    if (this.ws) {
+      try {
+        this.ws.removeAllListeners();
+      } catch {}
+      try {
+        this.ws.terminate();
+      } catch {}
+      this.ws = null;
+    }
+
     this.ws = new WebSocket(url);
 
     this.ws.on("open", () => {
@@ -148,23 +164,24 @@ export class BinanceWsGroup {
     this.ws.on("close", async (code, reason) => {
       this._clearHeartbeat();
       this.log?.warn?.({ name: this.name, code, reason: String(reason || "") }, "WS closed");
+
+      // cleanup listeners to avoid any retention
+      try {
+        this.ws?.removeAllListeners();
+      } catch {}
+
       this.ws = null;
       if (this.closedByUser) return;
       await this._reconnect();
     });
 
     this.ws.on("error", async (err) => {
-      // Most cases will also emit 'close'. If it doesn't, we still reconnect.
       this.log?.warn?.({ name: this.name, err: String(err) }, "WS error");
       if (this.closedByUser) return;
 
-      // If socket never opens or gets stuck, force reconnect.
       const rs = this.ws?.readyState;
-      if (rs === WebSocket.CLOSING || rs === WebSocket.CLOSED) {
-        return;
-      }
+      if (rs === WebSocket.CLOSING || rs === WebSocket.CLOSED) return;
 
-      // Some WS errors do not trigger close; be defensive.
       try {
         this.ws?.terminate();
       } catch {}
