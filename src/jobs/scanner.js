@@ -19,6 +19,11 @@ export class Scanner {
 
     // alt basket proxy
     this.altBasketSymbols = ["ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"];
+
+    // ====== MINIMAL BACKPRESSURE GUARDS (prevents async backlog / heap growth) ======
+    this._wsPending = 0;
+    this._wsMaxPending = Number(this.env.WS_MAX_PENDING_EVAL ?? 200); // safe default
+    this._evalLocks = new Set(); // per symbol+tf lock to avoid duplicate concurrent eval
   }
 
   getUniverse() {
@@ -74,8 +79,35 @@ export class Scanner {
       onKlineClosed: async ({ symbol, timeframe, candle }) => {
         this.candles.upsert(symbol, timeframe, candle);
 
-        // AUTO scanning entry on close
-        await this._evaluateAndMaybeSend({ symbol, timeframe, manualRequest: false });
+        // ====== BACKPRESSURE: prevent unbounded pending async evals ======
+        if (this._wsPending >= this._wsMaxPending) {
+          this.log.warn(
+            { symbol, timeframe, pending: this._wsPending, max: this._wsMaxPending },
+            "WS eval backlog too high; skipping eval to protect memory"
+          );
+          return;
+        }
+
+        const lockKey = `${symbol}:${timeframe}`;
+        if (this._evalLocks.has(lockKey)) {
+          // prevent duplicate concurrent eval for same key during bursts/reconnects
+          return;
+        }
+
+        this._wsPending++;
+        this._evalLocks.add(lockKey);
+
+        // Do not block WS handler with long awaits; but keep bounded pending.
+        (async () => {
+          try {
+            await this._evaluateAndMaybeSend({ symbol, timeframe, manualRequest: false });
+          } catch (e) {
+            this.log.error({ symbol, timeframe, err: String(e) }, "WS eval error");
+          } finally {
+            this._evalLocks.delete(lockKey);
+            this._wsPending--;
+          }
+        })();
       }
     });
   }
@@ -243,21 +275,12 @@ export class Scanner {
     if (!candidates.length) {
       return {
         ok: false,
-        reasons: [
-          "No valid setup found (LOCKED entry rules)",
-          "Or cooldown active",
-          "Or insufficient data"
-        ]
+        reasons: ["No valid setup found (LOCKED entry rules)", "Or cooldown active", "Or insufficient data"]
       };
     }
 
     // Rank candidates (keep a short list for selection logic)
     const ranked = rankCandidates(candidates, Math.min(10, candidates.length));
-
-    // Selection rules:
-    // - /scan <SYMBOL> (no TF): prefer intraday (15m/30m/1h). Allow 4h only if elite AND clearly better.
-    // - /scan (no args): allow 4h if elite; apply rotation so the same best symbol isn't repeated.
-    // - /scan <SYMBOL> <TF>: strict TF (tfs already constrained)
 
     let chosen = null;
 
@@ -279,10 +302,7 @@ export class Scanner {
     } else if (!symbol && !timeframe) {
       // rotation for /scan (no args)
       const last = this.store.getOnDemandLast(chatId);
-      const shouldExclude =
-        last &&
-        last.symbol &&
-        (Date.now() - (last.ts ?? 0)) / 60000 < rotateMinutes;
+      const shouldExclude = last && last.symbol && (Date.now() - (last.ts ?? 0)) / 60000 < rotateMinutes;
 
       if (shouldExclude) {
         chosen = ranked.find((c) => c.symbol !== last.symbol) ?? ranked[0];
@@ -295,10 +315,7 @@ export class Scanner {
 
     const top = chosen;
     if (!top) {
-      return {
-        ok: false,
-        reasons: ["No valid setup found (LOCKED entry rules)"]
-      };
+      return { ok: false, reasons: ["No valid setup found (LOCKED entry rules)"] };
     }
 
     const signal = {

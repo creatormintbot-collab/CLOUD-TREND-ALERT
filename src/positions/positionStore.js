@@ -50,9 +50,15 @@ export class PositionStore {
     if (!this.state.dailyCount) this.state.dailyCount = {};
     if (!this.state.universe) this.state.universe = { updatedAt: 0, symbols: [] };
     if (!this.state.onDemandLastByChat) this.state.onDemandLastByChat = {};
+
+    // ====== SAFETY: prevent unbounded growth in RAM + json files ======
+    this.cleanupState();
+    this.save();
   }
 
   save() {
+    // Keep data bounded before persisting
+    this.cleanupState();
     writeJsonAtomic(this.positionsFile, this.positions);
     writeJsonAtomic(this.stateFile, this.state);
   }
@@ -67,6 +73,92 @@ export class PositionStore {
     const m = String(d.getUTCMonth() + 1).padStart(2, "0");
     const dd = String(d.getUTCDate()).padStart(2, "0");
     return `${y}-${m}-${dd}`;
+  }
+
+  // Convert YYYY-MM-DD (UTC) to ms at 00:00:00Z safely
+  _dayKeyToMs(dayKey) {
+    // dayKey format: YYYY-MM-DD
+    const [y, m, d] = dayKey.split("-").map((x) => Number(x));
+    if (!y || !m || !d) return 0;
+    return Date.UTC(y, m - 1, d, 0, 0, 0, 0);
+  }
+
+  cleanupState() {
+    const now = this.now();
+
+    // ---- Positions pruning (CLOSED history can grow forever) ----
+    const maxClosed = Number(this.env.MAX_CLOSED_POSITIONS ?? 2000);
+    const keepClosedDays = Number(this.env.KEEP_CLOSED_DAYS ?? 30);
+    const minClosedTs = now - keepClosedDays * 24 * 60 * 60 * 1000;
+
+    if (Array.isArray(this.positions) && this.positions.length) {
+      const running = [];
+      const closed = [];
+
+      for (const p of this.positions) {
+        if (p && p.status === "RUNNING") running.push(p);
+        else closed.push(p);
+      }
+
+      // drop very old CLOSED by closedAt/openedAt
+      const closedFresh = closed.filter((p) => {
+        const ts = (p?.closedAt ?? p?.openedAt ?? 0);
+        return ts >= minClosedTs;
+      });
+
+      // cap CLOSED count: keep most recent by closedAt/openedAt
+      closedFresh.sort((a, b) => {
+        const ta = (a?.closedAt ?? a?.openedAt ?? 0);
+        const tb = (b?.closedAt ?? b?.openedAt ?? 0);
+        return tb - ta;
+      });
+
+      const cappedClosed = closedFresh.slice(0, Math.max(0, maxClosed));
+
+      this.positions = [...running, ...cappedClosed];
+    }
+
+    // ---- dailyCount pruning (grows forever by day key) ----
+    const keepDailyDays = Number(this.env.KEEP_DAILYCOUNT_DAYS ?? 14);
+    const minDayMs = now - keepDailyDays * 24 * 60 * 60 * 1000;
+
+    if (this.state.dailyCount && typeof this.state.dailyCount === "object") {
+      for (const k of Object.keys(this.state.dailyCount)) {
+        const dayMs = this._dayKeyToMs(k);
+        if (!dayMs || dayMs < minDayMs) delete this.state.dailyCount[k];
+      }
+    }
+
+    // ---- cooldown pruning (keys can grow; remove stale entries) ----
+    const keepCooldownDays = Number(this.env.KEEP_COOLDOWN_DAYS ?? 7);
+    const minCooldownTs = now - keepCooldownDays * 24 * 60 * 60 * 1000;
+
+    if (this.state.cooldown && typeof this.state.cooldown === "object") {
+      for (const k of Object.keys(this.state.cooldown)) {
+        const ts = Number(this.state.cooldown[k] ?? 0);
+        if (!ts || ts < minCooldownTs) delete this.state.cooldown[k];
+      }
+    }
+
+    // ---- onDemandLastByChat pruning (can grow forever by chatId) ----
+    const maxChats = Number(this.env.MAX_ONDEMAND_CHATS ?? 200);
+    if (this.state.onDemandLastByChat && typeof this.state.onDemandLastByChat === "object") {
+      const entries = Object.entries(this.state.onDemandLastByChat).map(([chatId, v]) => ({
+        chatId,
+        ts: Number(v?.ts ?? 0),
+        symbol: v?.symbol
+      }));
+
+      if (entries.length > maxChats) {
+        // keep newest
+        entries.sort((a, b) => b.ts - a.ts);
+        const keep = new Set(entries.slice(0, maxChats).map((x) => x.chatId));
+
+        for (const k of Object.keys(this.state.onDemandLastByChat)) {
+          if (!keep.has(k)) delete this.state.onDemandLastByChat[k];
+        }
+      }
+    }
   }
 
   canSendSignal({ symbol, timeframe, direction }) {
