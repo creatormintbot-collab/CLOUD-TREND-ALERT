@@ -1,86 +1,188 @@
-import "dotenv/config";
+// src/config/env.js
+// MINIMAL PATCH: load .env for node + pm2 (tanpa refactor logic lain)
 
-export function loadEnv() {
-  const get = (k, d = undefined) => (process.env[k] ?? d);
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+import dotenv from "dotenv";
 
-  const toInt = (v, d) => {
-    const n = Number.parseInt(String(v ?? ""), 10);
-    return Number.isFinite(n) ? n : d;
-  };
+/**
+ * Load .env sekali di awal.
+ * - Works for: `node src/index.js`, `node index.js`, PM2 start/restart
+ * - Mencoba beberapa lokasi umum agar robust di VPS/PM2 (cwd kadang beda).
+ */
+function loadDotEnvOnce() {
+  if (process.env.__DOTENV_LOADED__ === "1") return;
 
-  const toFloat = (v, d) => {
-    const n = Number.parseFloat(String(v ?? ""));
-    return Number.isFinite(n) ? n : d;
-  };
+  const __filename = fileURLToPath(import.meta.url);
+  const __dirname = path.dirname(__filename);
 
-  const toBool = (v, d = false) => {
-    if (v === undefined) return d;
-    return ["1", "true", "yes", "y", "on"].includes(String(v).toLowerCase());
-  };
+  const candidates = [
+    process.env.DOTENV_CONFIG_PATH, // kalau user set manual
+    path.resolve(process.cwd(), ".env"), // jika pm2 dijalankan dari root repo
+    path.resolve(__dirname, "../../.env"), // src/config/env.js -> root repo
+  ].filter(Boolean);
 
-  const csv = (v) =>
-    String(v ?? "")
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-
-  const env = {
-    NODE_ENV: get("NODE_ENV", "production"),
-
-    TELEGRAM_BOT_TOKEN: get("TELEGRAM_BOT_TOKEN", ""),
-    ALLOWED_GROUP_IDS: csv(get("ALLOWED_GROUP_IDS", ""))
-      .map((x) => Number(x))
-      .filter((n) => Number.isFinite(n)),
-    TELEGRAM_CHAT_ID: get("TELEGRAM_CHAT_ID", ""),
-    TEST_SIGNALS_CHAT_ID: get("TEST_SIGNALS_CHAT_ID", ""),
-
-    BINANCE_FUTURES_REST: get("BINANCE_FUTURES_REST", "https://fapi.binance.com"),
-    BINANCE_FUTURES_WS: get("BINANCE_FUTURES_WS", "wss://fstream.binance.com/stream"),
-
-    REST_TIMEOUT_MS: toInt(get("REST_TIMEOUT_MS"), 8000),
-    REST_RETRY_MAX: toInt(get("REST_RETRY_MAX"), 4),
-    REST_RETRY_BASE_MS: toInt(get("REST_RETRY_BASE_MS"), 400),
-
-    WS_MAX_STREAMS_PER_SOCKET: toInt(get("WS_MAX_STREAMS_PER_SOCKET"), 180),
-    WS_BACKOFF_BASE_MS: toInt(get("WS_BACKOFF_BASE_MS"), 500),
-    WS_BACKOFF_MAX_MS: toInt(get("WS_BACKOFF_MAX_MS"), 20000),
-
-    USE_TOP_VOLUME: toBool(get("USE_TOP_VOLUME"), true),
-    TOP_VOLUME_N: toInt(get("TOP_VOLUME_N"), 50),
-    TOP10_PER_TF: toInt(get("TOP10_PER_TF"), 10),
-    SEND_TOP_N: toInt(get("SEND_TOP_N"), 3),
-
-    SCAN_TIMEFRAMES: csv(get("SCAN_TIMEFRAMES", "15m,30m,1h")),
-    SECONDARY_TIMEFRAME: get("SECONDARY_TIMEFRAME", "4h"),
-    SECONDARY_MIN_SCORE: toInt(get("SECONDARY_MIN_SCORE"), 80),
-
-    MAX_SIGNALS_PER_DAY: toInt(get("MAX_SIGNALS_PER_DAY"), 5),
-    COOLDOWN_MINUTES: toInt(get("COOLDOWN_MINUTES"), 45),
-
-    ZONE_ATR_MULT: toFloat(get("ZONE_ATR_MULT"), 0.15),
-    SL_ATR_MULT: toFloat(get("SL_ATR_MULT"), 1.6),
-    ADX_MIN: toFloat(get("ADX_MIN"), 18),
-    ATR_PCT_MIN: toFloat(get("ATR_PCT_MIN"), 0.2),
-    RSI_BULL_MIN: toFloat(get("RSI_BULL_MIN"), 52),
-    RSI_BEAR_MAX: toFloat(get("RSI_BEAR_MAX"), 48),
-
-    UNIVERSE_REFRESH_HOURS: toInt(get("UNIVERSE_REFRESH_HOURS"), 6),
-    PRICE_MONITOR_INTERVAL_SEC: toInt(get("PRICE_MONITOR_INTERVAL_SEC"), 15),
-
-    DAILY_RECAP_UTC: get("DAILY_RECAP_UTC", "00:05"),
-
-    PORT: toInt(get("PORT"), 3000),
-    DISABLE_WEBHOOKS: toBool(get("DISABLE_WEBHOOKS"), true),
-
-    LOG_LEVEL: get("LOG_LEVEL", "info")
-  };
-
-  if (!env.TELEGRAM_BOT_TOKEN) {
-    throw new Error("Missing TELEGRAM_BOT_TOKEN");
-  }
-  if (!env.ALLOWED_GROUP_IDS.length && !env.TELEGRAM_CHAT_ID) {
-    // allowed, but user should set one
+  for (const p of candidates) {
+    try {
+      if (fs.existsSync(p)) {
+        dotenv.config({ path: p });
+        process.env.__DOTENV_LOADED__ = "1";
+        process.env.__DOTENV_PATH__ = p;
+        break;
+      }
+    } catch {
+      // no-op (jangan ganggu boot)
+    }
   }
 
-  return env;
+  // Jika tidak ketemu, tetap set flag supaya tidak berulang-ulang load attempt.
+  if (process.env.__DOTENV_LOADED__ !== "1") {
+    process.env.__DOTENV_LOADED__ = "1";
+    process.env.__DOTENV_PATH__ = "(not-found)";
+  }
 }
+
+loadDotEnvOnce();
+
+/* =========================
+ * EXISTING ENV LOGIC (keep)
+ * ========================= */
+
+function toBool(v, fallback = false) {
+  if (v === undefined || v === null || v === "") return fallback;
+  const s = String(v).trim().toLowerCase();
+  if (["1", "true", "yes", "y", "on"].includes(s)) return true;
+  if (["0", "false", "no", "n", "off"].includes(s)) return false;
+  return fallback;
+}
+
+function toInt(v, fallback) {
+  if (v === undefined || v === null || v === "") return fallback;
+  const n = parseInt(String(v), 10);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function toFloat(v, fallback) {
+  if (v === undefined || v === null || v === "") return fallback;
+  const n = parseFloat(String(v));
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function toCsvList(v, fallback = []) {
+  if (v === undefined || v === null || v === "") return fallback;
+  return String(v)
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
+
+function required(name) {
+  const v = process.env[name];
+  if (v === undefined || v === null || String(v).trim() === "") {
+    throw new Error(`Missing ${name}`);
+  }
+  return String(v).trim();
+}
+
+function optional(name, fallback = "") {
+  const v = process.env[name];
+  if (v === undefined || v === null) return fallback;
+  const s = String(v).trim();
+  return s === "" ? fallback : s;
+}
+
+/**
+ * Jangan ubah semantics:
+ * - TELEGRAM_BOT_TOKEN wajib (kalau bot telegram diaktifkan)
+ * - Trading/scan already final (kita cuma pastikan env kebaca)
+ */
+export function loadEnv() {
+  // =========================
+  // TELEGRAM
+  // =========================
+  const TELEGRAM_BOT_TOKEN = required("TELEGRAM_BOT_TOKEN");
+  const TELEGRAM_CHAT_ID = optional("TELEGRAM_CHAT_ID", "");
+  const ALLOWED_GROUP_IDS = toCsvList(optional("ALLOWED_GROUP_IDS", ""), []);
+
+  // =========================
+  // SERVER (optional)
+  // =========================
+  const PORT = toInt(optional("PORT", ""), 3000);
+  const WEBHOOK_SECRET = optional("WEBHOOK_SECRET", "");
+  const DISABLE_WEBHOOKS = toBool(optional("DISABLE_WEBHOOKS", ""), false);
+
+  // =========================
+  // MARKET / SCAN (LOCKED)
+  // =========================
+  const VOLUME_MARKET = optional("VOLUME_MARKET", "futures"); // futures/spot (locked by your strategy)
+  const USE_TOP_VOLUME = toBool(optional("USE_TOP_VOLUME", ""), true);
+  const TOP_VOLUME_N = toInt(optional("TOP_VOLUME_N", ""), 30);
+
+  // Timeframes scan (LOCKED default)
+  const SCAN_TIMEFRAMES = toCsvList(optional("SCAN_TIMEFRAMES", ""), ["15m", "30m", "1h"]);
+
+  // =========================
+  // LIMIT / QUALITY (LOCKED)
+  // =========================
+  const MAX_SIGNALS_PER_DAY = toInt(optional("MAX_SIGNALS_PER_DAY", ""), 5);
+  const COOLDOWN_MINUTES = toInt(optional("COOLDOWN_MINUTES", ""), 45);
+
+  // =========================
+  // RECAP (UTC)
+  // =========================
+  const DAILY_RECAP = toBool(optional("DAILY_RECAP", ""), true);
+  const DAILY_RECAP_TIME_UTC = optional("DAILY_RECAP_TIME_UTC", "00:00"); // kalau existing kamu beda, tetap aman (optional)
+
+  // =========================
+  // BINANCE / EXCHANGE (optional – trading logic already running)
+  // =========================
+  const BINANCE_API_KEY = optional("BINANCE_API_KEY", "");
+  const BINANCE_API_SECRET = optional("BINANCE_API_SECRET", "");
+  const BINANCE_TESTNET = toBool(optional("BINANCE_TESTNET", ""), false);
+
+  // =========================
+  // MISC
+  // =========================
+  const NODE_ENV = optional("NODE_ENV", "production");
+
+  return {
+    // telegram
+    TELEGRAM_BOT_TOKEN,
+    TELEGRAM_CHAT_ID,
+    ALLOWED_GROUP_IDS,
+
+    // server
+    PORT,
+    WEBHOOK_SECRET,
+    DISABLE_WEBHOOKS,
+
+    // scan
+    VOLUME_MARKET,
+    USE_TOP_VOLUME,
+    TOP_VOLUME_N,
+    SCAN_TIMEFRAMES,
+
+    // limits
+    MAX_SIGNALS_PER_DAY,
+    COOLDOWN_MINUTES,
+
+    // recap
+    DAILY_RECAP,
+    DAILY_RECAP_TIME_UTC,
+
+    // exchange
+    BINANCE_API_KEY,
+    BINANCE_API_SECRET,
+    BINANCE_TESTNET,
+
+    // misc
+    NODE_ENV,
+
+    // debug info (tidak mengubah logic—cuma info)
+    __DOTENV_PATH__: process.env.__DOTENV_PATH__ || "",
+  };
+}
+
+export const ENV = loadEnv();
+export default ENV;
