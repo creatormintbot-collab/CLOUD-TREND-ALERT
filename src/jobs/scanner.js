@@ -31,16 +31,37 @@ export class Scanner {
   }
 
   async initUniverse() {
-    // NOTE: return the array so callers can rely on it (minimal behavior improvement)
+    // If already available, return it
     if (this.universe?.length) return this.universe;
 
-    const syms = await this.binance.topPerpByVolume(this.env.TOP_VOLUME_N);
-    this.universe = syms;
-    this.store.setUniverse(syms);
+    // Always try to load from store first (fast, no REST)
+    try {
+      const cached = this.store.getUniverse?.() ?? [];
+      if (Array.isArray(cached) && cached.length) {
+        this.universe = cached;
+        this.log.info({ count: cached.length }, "Universe loaded from store cache");
+        return this.universe;
+      }
+    } catch (e) {
+      this.log.warn({ err: String(e) }, "Universe load from store failed (ignored)");
+    }
 
-    // helpful log for debugging WS streams=0 issue
-    this.log.info({ count: syms?.length ?? 0 }, "Universe initialized");
-    return this.universe;
+    // Then try REST top volume (may be rate limited)
+    try {
+      const syms = await this.binance.topPerpByVolume(this.env.TOP_VOLUME_N);
+      this.universe = syms;
+      this.store.setUniverse(syms);
+
+      this.log.info({ count: syms?.length ?? 0 }, "Universe initialized");
+      return this.universe;
+    } catch (e) {
+      // CRITICAL: DO NOT crash the whole app because REST is rate-limited
+      this.log.error({ err: String(e) }, "initUniverse failed (rate limit / REST issue). Keeping bot alive.");
+
+      // final fallback: keep empty but do NOT throw
+      this.universe = [];
+      return this.universe;
+    }
   }
 
   async backfillAllPrimary() {
@@ -81,12 +102,15 @@ export class Scanner {
   async startAutoWs() {
     // ====== CRITICAL GUARD ======
     // Prevent WS connect with empty streams (Binance returns 404 when streams=)
-    // This matches your logs: "streams":0 then WS 404.
     if (!this.universe || this.universe.length === 0) {
-      // try pulling from store once (in case initUniverse was called elsewhere but state not loaded into instance)
-      const fromStore = this.store.getUniverse?.() ?? [];
-      if (Array.isArray(fromStore) && fromStore.length) {
-        this.universe = fromStore;
+      // try pulling from store once
+      try {
+        const fromStore = this.store.getUniverse?.() ?? [];
+        if (Array.isArray(fromStore) && fromStore.length) {
+          this.universe = fromStore;
+        }
+      } catch (e) {
+        this.log.warn({ err: String(e) }, "WS guard: failed to read universe from store (ignored)");
       }
     }
 
@@ -98,47 +122,50 @@ export class Scanner {
       return;
     }
 
-    await this.binance.subscribeKlines({
-      symbols: this.universe,
-      tfs: this.env.SCAN_TIMEFRAMES,
-      onKlineClosed: async ({ symbol, timeframe, candle }) => {
-        this.candles.upsert(symbol, timeframe, candle);
+    try {
+      await this.binance.subscribeKlines({
+        symbols: this.universe,
+        tfs: this.env.SCAN_TIMEFRAMES,
+        onKlineClosed: async ({ symbol, timeframe, candle }) => {
+          this.candles.upsert(symbol, timeframe, candle);
 
-        // ====== BACKPRESSURE: prevent unbounded pending async evals ======
-        if (this._wsPending >= this._wsMaxPending) {
-          this.log.warn(
-            { symbol, timeframe, pending: this._wsPending, max: this._wsMaxPending },
-            "WS eval backlog too high; skipping eval to protect memory"
-          );
-          return;
-        }
-
-        const lockKey = `${symbol}:${timeframe}`;
-        if (this._evalLocks.has(lockKey)) {
-          // prevent duplicate concurrent eval for same key during bursts/reconnects
-          return;
-        }
-
-        this._wsPending++;
-        this._evalLocks.add(lockKey);
-
-        // Do not block WS handler with long awaits; but keep bounded pending.
-        (async () => {
-          try {
-            await this._evaluateAndMaybeSend({ symbol, timeframe, manualRequest: false });
-          } catch (e) {
-            this.log.error({ symbol, timeframe, err: String(e) }, "WS eval error");
-          } finally {
-            this._evalLocks.delete(lockKey);
-            this._wsPending--;
+          // ====== BACKPRESSURE: prevent unbounded pending async evals ======
+          if (this._wsPending >= this._wsMaxPending) {
+            this.log.warn(
+              { symbol, timeframe, pending: this._wsPending, max: this._wsMaxPending },
+              "WS eval backlog too high; skipping eval to protect memory"
+            );
+            return;
           }
-        })();
-      }
-    });
+
+          const lockKey = `${symbol}:${timeframe}`;
+          if (this._evalLocks.has(lockKey)) {
+            return;
+          }
+
+          this._wsPending++;
+          this._evalLocks.add(lockKey);
+
+          (async () => {
+            try {
+              await this._evaluateAndMaybeSend({ symbol, timeframe, manualRequest: false });
+            } catch (e) {
+              this.log.error({ symbol, timeframe, err: String(e) }, "WS eval error");
+            } finally {
+              this._evalLocks.delete(lockKey);
+              this._wsPending--;
+            }
+          })();
+        }
+      });
+    } catch (e) {
+      // CRITICAL: DO NOT crash app if WS subscribe fails
+      this.log.error({ err: String(e) }, "startAutoWs failed (ignored). Bot stays alive.");
+      return;
+    }
   }
 
   async _evaluateAndMaybeSend({ symbol, timeframe, manualRequest }) {
-    // daily cap for AUTO only (on-demand can still produce NO SIGNAL)
     if (!manualRequest && this.store.dailyLimitReached()) return;
 
     const candles = this.candles.get(symbol, timeframe);
@@ -147,7 +174,6 @@ export class Scanner {
 
     const direction = evalRes.direction;
 
-    // cooldown applies to AUTO only
     if (!manualRequest && !this.store.canSendSignal({ symbol, timeframe, direction })) return;
 
     const entryMid = candles[candles.length - 1].close; // LOCKED: close candle CLOSED
@@ -166,7 +192,6 @@ export class Scanner {
       macroBias: macro.bias
     });
 
-    // 4h rule: secondary timeframe must meet minimum score
     if (timeframe === this.env.SECONDARY_TIMEFRAME && score.finalScore < this.env.SECONDARY_MIN_SCORE) {
       return;
     }
@@ -181,7 +206,6 @@ export class Scanner {
       createdAt: Date.now()
     };
 
-    // persist + open position
     const pos = {
       symbol,
       timeframe,
@@ -219,16 +243,13 @@ export class Scanner {
   }
 
   _autoTargetChatId() {
-    // if TEST_SIGNALS_CHAT_ID is set, send only there
     if (this.env.TEST_SIGNALS_CHAT_ID) return this.env.TEST_SIGNALS_CHAT_ID;
-    // else: if ALLOWED_GROUP_IDS exists, send to first as default
     if (this.env.ALLOWED_GROUP_IDS?.length) return this.env.ALLOWED_GROUP_IDS[0];
     if (this.env.TELEGRAM_CHAT_ID) return this.env.TELEGRAM_CHAT_ID;
     return null;
   }
 
   async scanOnDemand({ symbol, timeframe, chatId }) {
-    // timeframe null => scan primary + secondary (4h) and pick best
     const primaryTfs = this.env.SCAN_TIMEFRAMES;
     const secondaryTf = this.env.SECONDARY_TIMEFRAME;
     const tfs = timeframe ? [timeframe] : [...primaryTfs, secondaryTf].filter(Boolean);
@@ -244,7 +265,6 @@ export class Scanner {
       symbols = this.universe.slice(0, this.env.TOP_VOLUME_N);
     }
 
-    // ensure backfill for requested
     for (const s of symbols) {
       for (const tf of tfs) {
         if (!this.candles.hasMin(s, tf, 300)) {
@@ -264,8 +284,6 @@ export class Scanner {
 
         const direction = evalRes.direction;
 
-        // On-demand has NO daily cap and NO cooldown gate.
-        // But do not create duplicate running position for the same symbol+tf.
         if (this._hasRunningPosition(s, tf)) continue;
 
         const entryMid = candles[candles.length - 1].close;
@@ -307,13 +325,11 @@ export class Scanner {
       };
     }
 
-    // Rank candidates (keep a short list for selection logic)
     const ranked = rankCandidates(candidates, Math.min(10, candidates.length));
 
     let chosen = null;
 
     if (symbol && !timeframe) {
-      // best intraday
       const intraday = ranked.filter((c) => c.timeframe !== secondaryTf);
       const bestIntraday = intraday[0] ?? null;
 
@@ -328,7 +344,6 @@ export class Scanner {
         chosen = bestIntraday;
       }
     } else if (!symbol && !timeframe) {
-      // rotation for /scan (no args)
       const last = this.store.getOnDemandLast(chatId);
       const shouldExclude = last && last.symbol && (Date.now() - (last.ts ?? 0)) / 60000 < rotateMinutes;
 
@@ -356,7 +371,6 @@ export class Scanner {
       createdAt: Date.now()
     };
 
-    // open position + persist (on-demand also opens lifecycle tracking)
     const pos = {
       symbol: signal.symbol,
       timeframe: signal.timeframe,
@@ -375,8 +389,6 @@ export class Scanner {
       openedAt: Date.now()
     };
 
-    // On-demand: DO NOT increment dailyCount (no daily limit).
-    // But we still set cooldown timestamp to avoid immediate duplicate picks in AUTO / logs.
     try {
       const key = `${signal.symbol}:${signal.timeframe}:${signal.direction}`;
       if (this.store?.state?.cooldown) {
@@ -390,7 +402,6 @@ export class Scanner {
     this.store.appendSignalAudit({ ...signal, manualRequest: true, requestedByChat: chatId });
     this.store.upsertPosition(pos);
 
-    // Save last pick for /scan rotation
     this.store.setOnDemandLast(chatId, { symbol: signal.symbol, ts: Date.now() });
 
     return { ok: true, signal };
