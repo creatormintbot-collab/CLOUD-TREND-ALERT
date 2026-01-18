@@ -122,6 +122,14 @@ export function loadEnv() {
   // Timeframes scan (LOCKED default)
   const SCAN_TIMEFRAMES = toCsvList(optional("SCAN_TIMEFRAMES", ""), ["15m", "30m", "1h"]);
 
+// Secondary timeframe (LOCKED: 4H tetap aktif)
+// Dipakai untuk macro + aturan 4H min score
+const SECONDARY_TIMEFRAME = optional("SECONDARY_TIMEFRAME", "4h");
+const SECONDARY_MIN_SCORE = toInt(optional("SECONDARY_MIN_SCORE", ""), 80);
+const FOUR_H_MARGIN_OVER_INTRADAY = toInt(optional("FOUR_H_MARGIN_OVER_INTRADAY", ""), 5);
+const ROTATE_EXCLUDE_MINUTES = toInt(optional("ROTATE_EXCLUDE_MINUTES", ""), 30);
+const TEST_SIGNALS_CHAT_ID = optional("TEST_SIGNALS_CHAT_ID", "");
+
   // =========================
   // LIMIT / QUALITY (LOCKED)
   // =========================
@@ -141,36 +149,9 @@ export function loadEnv() {
   const BINANCE_API_SECRET = optional("BINANCE_API_SECRET", "");
   const BINANCE_TESTNET = toBool(optional("BINANCE_TESTNET", ""), false);
 
-  // =========================
-  // BINANCE FUTURES ENDPOINTS (MINIMAL FIX)
-  // =========================
-  // Required by src/exchange/binanceFutures.js (REST baseURL) + WS groups
-  const BINANCE_FUTURES_REST = optional(
-    "BINANCE_FUTURES_REST",
-    BINANCE_TESTNET ? "https://testnet.binancefuture.com" : "https://fapi.binance.com"
-  );
-  const BINANCE_FUTURES_WS = optional(
-    "BINANCE_FUTURES_WS",
-    BINANCE_TESTNET ? "wss://stream.binancefuture.com" : "wss://fstream.binance.com"
-  );
-
-  // =========================
-  // REST HARDENING DEFAULTS (backward compatible)
-  // =========================
-  const REST_TIMEOUT_MS = toInt(optional("REST_TIMEOUT_MS", ""), 15000);
-  const REST_RETRY_MAX = toInt(optional("REST_RETRY_MAX", ""), 2);
-  const REST_RETRY_BASE_MS = toInt(optional("REST_RETRY_BASE_MS", ""), 250);
-  const REST_MAX_CONCURRENT = toInt(optional("REST_MAX_CONCURRENT", ""), 8);
-  const REST_MIN_INTERVAL_MS = toInt(optional("REST_MIN_INTERVAL_MS", ""), 0);
-
-  // =========================
-  // WS HARDENING DEFAULTS (backward compatible)
-  // =========================
-  const WS_MAX_STREAMS_PER_SOCKET = toInt(optional("WS_MAX_STREAMS_PER_SOCKET", ""), 180);
-  const WS_BACKOFF_BASE_MS = toInt(optional("WS_BACKOFF_BASE_MS", ""), 500);
-  const WS_BACKOFF_MAX_MS = toInt(optional("WS_BACKOFF_MAX_MS", ""), 15000);
-  const WS_PING_INTERVAL_MS = toInt(optional("WS_PING_INTERVAL_MS", ""), 15000);
-  const WS_PONG_TIMEOUT_MS = toInt(optional("WS_PONG_TIMEOUT_MS", ""), 30000);
+// Base URLs (prevent Invalid URL when exchange uses relative paths)
+const BINANCE_FUTURES_REST = optional("BINANCE_FUTURES_REST", "https://fapi.binance.com");
+const BINANCE_WS_BASE = optional("BINANCE_WS_BASE", "wss://fstream.binance.com");
 
   // =========================
   // LOGGING (MINIMAL FIX)
@@ -213,20 +194,6 @@ export function loadEnv() {
     BINANCE_API_KEY,
     BINANCE_API_SECRET,
     BINANCE_TESTNET,
-    BINANCE_FUTURES_REST,
-    BINANCE_FUTURES_WS,
-
-    REST_TIMEOUT_MS,
-    REST_RETRY_MAX,
-    REST_RETRY_BASE_MS,
-    REST_MAX_CONCURRENT,
-    REST_MIN_INTERVAL_MS,
-
-    WS_MAX_STREAMS_PER_SOCKET,
-    WS_BACKOFF_BASE_MS,
-    WS_BACKOFF_MAX_MS,
-    WS_PING_INTERVAL_MS,
-    WS_PONG_TIMEOUT_MS,
 
     // logging
     LOG_LEVEL,

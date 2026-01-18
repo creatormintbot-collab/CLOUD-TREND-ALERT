@@ -123,7 +123,13 @@ export class BinanceRest {
     return r.data;
   }
 
-  async klines({ symbol, interval, limit = 300 }) {
+async klines({ symbol, interval, limit = 300 }) {
+  // MINIMAL FIX: prevent sending undefined interval (Binance returns 400)
+  if (!interval) {
+    const err = new Error("Missing interval for klines()");
+    err.code = "MISSING_INTERVAL";
+    throw err;
+  }
     const r = await this.request({
       method: "GET",
       url: "/fapi/v1/klines",
