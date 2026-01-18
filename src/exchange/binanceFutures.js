@@ -1,6 +1,22 @@
 import { BinanceRest } from "./binanceRest.js";
 import { BinanceWsGroup, chunkStreams } from "./binanceWs.js";
 
+function normalizeList(input) {
+  // Accept array or CSV string; returns clean array of strings
+  if (!input) return [];
+  if (Array.isArray(input)) {
+    return input.map((x) => String(x).trim()).filter(Boolean);
+  }
+  if (typeof input === "string") {
+    // If user passes single tf "15m" -> ok; if "15m,30m,1h" -> split
+    return input
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+  return [];
+}
+
 export class BinanceFutures {
   constructor(env, logger) {
     this.env = env;
@@ -68,11 +84,24 @@ export class BinanceFutures {
   async subscribeKlines({ symbols, tfs, onKlineClosed }) {
     await this.unsubscribeAll();
 
+    const safeSymbols = normalizeList(symbols);
+    const safeTfs = normalizeList(tfs);
+
     const streams = [];
-    for (const sym of symbols) {
-      for (const tf of tfs) {
+    for (const sym of safeSymbols) {
+      for (const tf of safeTfs) {
         streams.push(`${sym.toLowerCase()}@kline_${tf}`);
       }
+    }
+
+    // ===== CRITICAL GUARD: prevent WS connect with streams=0 (causes 404 loop) =====
+    if (!streams.length) {
+      this.log.warn(
+        { name: "klines", symbols: safeSymbols.length, tfs: safeTfs.length, streams: 0 },
+        "WS subscribe skipped: empty streams (would cause 404 / reconnect loop)"
+      );
+      this.wsGroups = [];
+      return;
     }
 
     const chunks = chunkStreams(streams, this.env.WS_MAX_STREAMS_PER_SOCKET);
@@ -97,24 +126,29 @@ export class BinanceFutures {
 
     for (const g of this.wsGroups) {
       g.setHandler((msg) => {
-        const data = msg?.data;
-        if (!data?.e || data.e !== "kline") return;
+        try {
+          const data = msg?.data;
+          if (!data?.e || data.e !== "kline") return;
 
-        const k = data.k;
-        if (!k?.x) return; // decision only on candle closed
-        onKlineClosed({
-          symbol: data.s,
-          timeframe: k.i,
-          candle: {
-            openTime: Number(k.t),
-            open: Number(k.o),
-            high: Number(k.h),
-            low: Number(k.l),
-            close: Number(k.c),
-            volume: Number(k.v),
-            closeTime: Number(k.T)
-          }
-        });
+          const k = data.k;
+          if (!k?.x) return; // decision only on candle closed
+
+          onKlineClosed({
+            symbol: data.s,
+            timeframe: k.i,
+            candle: {
+              openTime: Number(k.t),
+              open: Number(k.o),
+              high: Number(k.h),
+              low: Number(k.l),
+              close: Number(k.c),
+              volume: Number(k.v),
+              closeTime: Number(k.T)
+            }
+          });
+        } catch (e) {
+          this.log.error({ name: g?.name, err: String(e) }, "WS kline handler error (ignored)");
+        }
       });
       await g.start();
     }
