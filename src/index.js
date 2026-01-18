@@ -17,25 +17,16 @@ import { createServer } from "./server/httpServer.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-function hasValidBotToken(token) {
-  if (!token) return false;
-  const t = String(token).trim();
-  return t.length >= 10 && t.includes(":");
-}
-
 function createBotStub(logger) {
-  const warn = logger?.warn?.bind(logger) || (() => {});
+  const noop = async () => undefined;
   return {
-    // used by jobs
-    sendMessage: async () => {
-      warn("Telegram disabled: sendMessage called but BOT_TOKEN missing/invalid");
-    },
-    // used by legacy binding
-    onText: () => {},
-    // used by shutdown
-    stopPolling: async () => {},
-    // used by some telegram wrappers
-    _scanner: null
+    sendMessage: noop,
+    stopPolling: noop,
+    on: () => undefined,
+    onText: () => undefined,
+    _isStub: true,
+    _scanner: null,
+    logger
   };
 }
 
@@ -71,6 +62,11 @@ async function main() {
     if (!process.env[k]) process.env[k] = fapiBase;
   }
 
+  // MINIMAL FIX: daily recap env key compatibility (prevents "missing/invalid DAILY_RECAP_UTC" spam)
+  // Some parts use DAILY_RECAP_UTC while env loader may expose DAILY_RECAP_TIME_UTC.
+  if (!env.DAILY_RECAP_UTC && env.DAILY_RECAP_TIME_UTC) env.DAILY_RECAP_UTC = env.DAILY_RECAP_TIME_UTC;
+  if (!env.DAILY_RECAP_TIME_UTC && env.DAILY_RECAP_UTC) env.DAILY_RECAP_TIME_UTC = env.DAILY_RECAP_UTC;
+
   const dataDir = path.join(__dirname, "..", "data");
   const positionStore = new PositionStore({ dataDir, logger, env });
   const candleStore = new CandleStore({ limit: 650, logger });
@@ -78,18 +74,14 @@ async function main() {
   const binance = new BinanceFutures(env, logger);
 
   // Telegram
-  // HARD GUARD: never crash boot if BOT_TOKEN missing/invalid
-  let bot;
-  if (!hasValidBotToken(env.BOT_TOKEN ?? process.env.BOT_TOKEN)) {
-    logger.warn({ BOT_TOKEN: "missing/invalid" }, "Telegram bot NOT started: BOT_TOKEN missing/invalid");
+  let bot = createBotStub(logger);
+  try {
+    bot = createTelegramBot({ env, logger, scanner: { getUniverse: () => positionStore.getUniverse() } });
+    logger.info("Telegram bot started (polling)");
+  } catch (e) {
+    // Never crash the whole service just because Telegram env is wrong.
+    logger.warn({ err: String(e) }, "Telegram bot NOT started; using stub bot");
     bot = createBotStub(logger);
-  } else {
-    try {
-      bot = createTelegramBot({ env, logger, scanner: { getUniverse: () => positionStore.getUniverse() } });
-    } catch (e) {
-      logger.error({ err: String(e) }, "Telegram bot failed to start (guarded)");
-      bot = createBotStub(logger);
-    }
   }
 
   // Scanner
