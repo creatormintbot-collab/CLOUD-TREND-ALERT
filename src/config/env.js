@@ -142,6 +142,13 @@ export function loadEnv() {
   const BINANCE_TESTNET = toBool(optional("BINANCE_TESTNET", ""), false);
 
   // =========================
+  // LOGGING (MINIMAL FIX)
+  // =========================
+  // Pino butuh level yang valid. Jika env tidak ada, fallback ke "info".
+  // Ini tidak mengubah strategy, hanya mencegah crash saat boot.
+  const LOG_LEVEL = optional("LOG_LEVEL", optional("PINO_LEVEL", "info"));
+
+  // =========================
   // MISC
   // =========================
   const NODE_ENV = optional("NODE_ENV", "production");
@@ -175,6 +182,9 @@ export function loadEnv() {
     BINANCE_API_KEY,
     BINANCE_API_SECRET,
     BINANCE_TESTNET,
+
+    // logging
+    LOG_LEVEL,
 
     // misc
     NODE_ENV,
