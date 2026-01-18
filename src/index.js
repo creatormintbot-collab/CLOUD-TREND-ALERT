@@ -20,10 +20,34 @@ const __dirname = path.dirname(__filename);
 async function main() {
   const env = loadEnv();
 
+  // MINIMAL FIX: pino level must never be undefined (prevents crash on boot)
+  // NOTE: keep behavior the same; just add safe fallback
+  const logLevel =
+    String(env.LOG_LEVEL ?? process.env.LOG_LEVEL ?? process.env.PINO_LEVEL ?? "info").trim() || "info";
+
   const logger = pino({
-    level: env.LOG_LEVEL,
+    level: logLevel,
     base: { app: "cloud-trend-alert" }
   });
+
+  // MINIMAL FIX: ensure Binance REST base URL is not empty (prevents Invalid URL '/fapi/v1/klines')
+  // We populate BOTH env object + process.env because some exchange layers read either.
+  const fapiBase = "https://fapi.binance.com";
+  const baseKeys = [
+    "BINANCE_FAPI_BASE_URL",
+    "BINANCE_FAPI_URL",
+    "BINANCE_FUTURES_REST_BASE_URL",
+    "BINANCE_FUTURES_BASE_URL",
+    "BINANCE_REST_BASE_URL",
+    "BINANCE_REST_API_BASE_URL",
+    "BINANCE_API_BASE_URL",
+    "BINANCE_BASE_URL",
+    "BINANCE_ENDPOINT"
+  ];
+  for (const k of baseKeys) {
+    if (!env[k]) env[k] = fapiBase;
+    if (!process.env[k]) process.env[k] = fapiBase;
+  }
 
   const dataDir = path.join(__dirname, "..", "data");
   const positionStore = new PositionStore({ dataDir, logger, env });
@@ -55,7 +79,8 @@ async function main() {
     statusProvider: {
       getStatus: () => {
         const now = Date.now();
-        const runningCount = typeof positionStore.listRunning === "function" ? positionStore.listRunning().length : undefined;
+        const runningCount =
+          typeof positionStore.listRunning === "function" ? positionStore.listRunning().length : undefined;
         return {
           app: "cloud-trend-alert",
           ts: new Date(now).toISOString(),
@@ -166,7 +191,9 @@ async function main() {
    */
   const bindCommandsInIndex = String(env.BIND_COMMANDS_IN_INDEX ?? "").trim() === "1";
   if (bindCommandsInIndex) {
-    logger.warn("Binding Telegram commands from index.js (legacy mode) – ensure telegram.js does not also bind commands");
+    logger.warn(
+      "Binding Telegram commands from index.js (legacy mode) – ensure telegram.js does not also bind commands"
+    );
 
     // attach scanner to telegram handlers (legacy bridge)
     // (node-telegram-bot-api doesn't support DI well without refactor)
