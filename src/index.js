@@ -48,8 +48,23 @@ async function main() {
   // rebind scanner into bot commands
   bot._scanner = scanner;
 
-  // Server (health)
-  const server = createServer({ env });
+  // Server (health/ready)
+  const server = createServer({
+    env,
+    logger,
+    statusProvider: {
+      getStatus: () => {
+        const now = Date.now();
+        const runningCount = typeof positionStore.listRunning === "function" ? positionStore.listRunning().length : undefined;
+        return {
+          app: "cloud-trend-alert",
+          ts: new Date(now).toISOString(),
+          uptimeSec: Math.floor(process.uptime()),
+          positionsRunning: runningCount
+        };
+      }
+    }
+  });
 
   // Bootstrap
   await scanner.initUniverse();
@@ -84,47 +99,96 @@ async function main() {
 
   logger.info("CLOUD TREND ALERT started (AUTO + ON-DEMAND)");
 
+  let shuttingDown = false;
   const shutdown = async (sig) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+
     logger.warn({ sig }, "Graceful shutdown begin");
+
+    // Stop periodic jobs FIRST to avoid new work while shutting down
     try {
       stopMonitor?.();
       stopRecap?.();
       stopUniverse?.();
-      await binance.unsubscribeAll();
-      positionStore.save();
-      server?.close?.();
-      bot?.stopPolling?.();
     } catch (e) {
-      logger.error({ err: String(e) }, "Shutdown error");
-    } finally {
-      logger.warn("Shutdown complete");
-      process.exit(0);
+      logger.warn({ err: String(e) }, "Error stopping jobs");
     }
+
+    // Close external resources
+    try {
+      await binance?.unsubscribeAll?.();
+    } catch (e) {
+      logger.warn({ err: String(e) }, "Error closing Binance subscriptions");
+    }
+
+    // Persist state
+    try {
+      positionStore?.save?.();
+    } catch (e) {
+      logger.warn({ err: String(e) }, "Error saving PositionStore");
+    }
+
+    // Stop polling and HTTP server
+    try {
+      await bot?.stopPolling?.();
+    } catch (e) {
+      // stopPolling may throw if already stopped
+      logger.warn({ err: String(e) }, "Error stopping Telegram polling");
+    }
+
+    try {
+      await new Promise((resolve) => {
+        if (!server?.close) return resolve();
+        server.close(() => resolve());
+      });
+    } catch (e) {
+      logger.warn({ err: String(e) }, "Error closing HTTP server");
+    }
+
+    logger.warn("Shutdown complete");
+    process.exit(0);
   };
 
-  process.on("SIGINT", () => shutdown("SIGINT"));
-  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  // Use .once to prevent duplicate handlers (important for PM2 restarts)
+  process.once("SIGINT", () => shutdown("SIGINT"));
+  process.once("SIGTERM", () => shutdown("SIGTERM"));
 
-  // attach scanner to telegram handlers (simple bridge)
-  // (node-telegram-bot-api doesn't support DI well without refactor)
-  bot.onText(/^\/scan(?:\s+(.+))?$/, async (msg, match) => {
-    const chatId = msg.chat.id;
-    const raw = (match?.[1] ?? "").trim();
-    const args = raw ? raw.split(/\s+/) : [];
-    const { handleScanCommand } = await import("./bot/commands/scan.js");
-    await handleScanCommand({ bot, chatId, args, scanner, logger });
-  });
+  /**
+   * IMPORTANT:
+   * Commands (/scan, /top, /help) should be registered in ONE place only.
+   * We prefer src/bot/telegram.js as the single source of truth.
+   * This avoids duplicate handlers that can cause duplicated progress UI
+   * (e.g., "Finalizing data..." appearing twice).
+   *
+   * If you ever need the legacy binding from index.js (not recommended),
+   * you can enable it via env BIND_COMMANDS_IN_INDEX=1.
+   */
+  const bindCommandsInIndex = String(env.BIND_COMMANDS_IN_INDEX ?? "").trim() === "1";
+  if (bindCommandsInIndex) {
+    logger.warn("Binding Telegram commands from index.js (legacy mode) – ensure telegram.js does not also bind commands");
 
-  bot.onText(/^\/top\b/, async (msg) => {
-    const u = scanner.getUniverse();
-    const { topText } = await import("./bot/commands/top.js");
-    await bot.sendMessage(msg.chat.id, topText(u), { parse_mode: "HTML" });
-  });
+    // attach scanner to telegram handlers (legacy bridge)
+    // (node-telegram-bot-api doesn't support DI well without refactor)
+    bot.onText(/^\/scan(?:\s+(.+))?$/, async (msg, match) => {
+      const chatId = msg.chat.id;
+      const raw = (match?.[1] ?? "").trim();
+      const args = raw ? raw.split(/\s+/) : [];
+      const { handleScanCommand } = await import("./bot/commands/scan.js");
+      await handleScanCommand({ bot, chatId, args, scanner, logger });
+    });
 
-  bot.onText(/^\/help\b/, async (msg) => {
-    const { helpText } = await import("./bot/commands/help.js");
-    await bot.sendMessage(msg.chat.id, helpText(), { parse_mode: "HTML" });
-  });
+    bot.onText(/^\/top\b/, async (msg) => {
+      const u = scanner.getUniverse();
+      const { topText } = await import("./bot/commands/top.js");
+      await bot.sendMessage(msg.chat.id, topText(u), { parse_mode: "HTML" });
+    });
+
+    bot.onText(/^\/help\b/, async (msg) => {
+      const { helpText } = await import("./bot/commands/help.js");
+      await bot.sendMessage(msg.chat.id, helpText(), { parse_mode: "HTML" });
+    });
+  }
 }
 
 main().catch((e) => {

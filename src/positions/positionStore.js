@@ -39,8 +39,17 @@ export class PositionStore {
       cooldown: {}, // key => lastSignalTs
       dailyCount: {}, // YYYY-MM-DD => count
       recapStamp: null,
-      universe: { updatedAt: 0, symbols: [] }
+      universe: { updatedAt: 0, symbols: [] },
+
+      // On-demand scan rotation (per chat) to avoid repeating the same best symbol.
+      onDemandLastByChat: {}
     });
+
+    // Backward-compatible defaults for older state.json
+    if (!this.state.cooldown) this.state.cooldown = {};
+    if (!this.state.dailyCount) this.state.dailyCount = {};
+    if (!this.state.universe) this.state.universe = { updatedAt: 0, symbols: [] };
+    if (!this.state.onDemandLastByChat) this.state.onDemandLastByChat = {};
   }
 
   save() {
@@ -101,7 +110,7 @@ export class PositionStore {
     return this.positions.filter((p) => p.status === "RUNNING");
   }
 
-  closePosition({ symbol, timeframe, reason, closedAt, win }) {
+  closePosition({ symbol, timeframe, reason, closedAt, win, closeOutcome }) {
     const idx = this.positions.findIndex(
       (p) => p.symbol === symbol && p.timeframe === timeframe && p.status === "RUNNING"
     );
@@ -110,10 +119,33 @@ export class PositionStore {
     p.status = "CLOSED";
     p.closedAt = closedAt ?? this.now();
     p.closeReason = reason;
-    p.win = Boolean(win);
+
+    // Prefer explicit closeOutcome if provided (PROFIT_FULL / PROFIT_PARTIAL / LOSS)
+    if (closeOutcome) p.closeOutcome = closeOutcome;
+
+    // Legacy boolean: treat PROFIT_* as win, LOSS as loss
+    if (p.closeOutcome === "PROFIT_FULL" || p.closeOutcome === "PROFIT_PARTIAL") {
+      p.win = true;
+    } else if (p.closeOutcome === "LOSS") {
+      p.win = false;
+    } else {
+      p.win = Boolean(win);
+    }
     this.positions[idx] = p;
     this.save();
     return p;
+  }
+
+  // Store the last on-demand /scan pick per chat, used for rotation.
+  setOnDemandLast(chatId, { symbol, ts }) {
+    if (!chatId) return;
+    this.state.onDemandLastByChat[String(chatId)] = { symbol, ts: ts ?? this.now() };
+    this.save();
+  }
+
+  getOnDemandLast(chatId) {
+    if (!chatId) return null;
+    return this.state.onDemandLastByChat?.[String(chatId)] ?? null;
   }
 
   updatePosition(p) {

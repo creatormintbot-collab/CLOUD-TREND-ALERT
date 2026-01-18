@@ -24,9 +24,9 @@ export function startPriceMonitor({ env, logger, binance, candleStore, positionS
       if (!mark) continue;
 
       // EMA55 from current TF candles (for TP2 suggested SL)
-      const c = candleStore.get(p.symbol, p.timeframe);
+      const c = candleStore.get(p.symbol, p.timeframe) || [];
       const closes = c.map((x) => x.close);
-      const ema55 = ema(closes, 55);
+      const ema55 = closes.length >= 55 ? ema(closes, 55) : null;
 
       const { events, updatedPosition } = checkLifecycle({
         position: p,
@@ -35,10 +35,19 @@ export function startPriceMonitor({ env, logger, binance, candleStore, positionS
         env
       });
 
-      if (!events.length) continue;
+      if (!events.length) {
+        // keep store in sync if monitor updates flags without emitting events (rare)
+        if (updatedPosition && updatedPosition !== p) {
+          positionStore.updatePosition(updatedPosition);
+        }
+        continue;
+      }
 
       // send events in order
       for (const ev of events) {
+        // safety: if TP3 already hit/closed, never emit SL for this same position
+        if (ev.type === "SL" && updatedPosition?.tp3Hit) continue;
+
         if (ev.type === "TP1" || ev.type === "TP2" || ev.type === "TP3") {
           await bot.sendMessage(
             env.TEST_SIGNALS_CHAT_ID || (env.ALLOWED_GROUP_IDS?.[0] ?? env.TELEGRAM_CHAT_ID),
@@ -61,23 +70,35 @@ export function startPriceMonitor({ env, logger, binance, candleStore, positionS
 
       // persist position status
       if (updatedPosition.status === "CLOSED") {
-        const win = updatedPosition.tp3Hit || updatedPosition.tp2Hit || updatedPosition.tp1Hit;
+        const closeOutcome = updatedPosition.closeOutcome;
+        let win = updatedPosition.tp3Hit || updatedPosition.tp2Hit || updatedPosition.tp1Hit;
+
+        // outcome-aware (keeps backward compatibility)
+        if (closeOutcome === "LOSS") win = false;
+        if (closeOutcome === "PROFIT_FULL" || closeOutcome === "PROFIT_PARTIAL") win = true;
+
         positionStore.closePosition({
           symbol: updatedPosition.symbol,
           timeframe: updatedPosition.timeframe,
           reason: updatedPosition.tp3Hit ? "TP3" : "SL",
-          win
+          win,
+          closeOutcome
         });
-        logger.info({ symbol: updatedPosition.symbol, tf: updatedPosition.timeframe, win }, "Position CLOSED");
+
+        logger.info(
+          { symbol: updatedPosition.symbol, tf: updatedPosition.timeframe, win, closeOutcome },
+          "Position CLOSED"
+        );
       } else {
         positionStore.updatePosition(updatedPosition);
       }
     }
   };
 
+  const intervalSec = Number(env.PRICE_MONITOR_INTERVAL_SEC) || 15;
   const handle = setInterval(() => {
     tick().catch((e) => logger.error({ err: String(e) }, "priceMonitor tick error"));
-  }, env.PRICE_MONITOR_INTERVAL_SEC * 1000);
+  }, intervalSec * 1000);
 
   return () => clearInterval(handle);
 }

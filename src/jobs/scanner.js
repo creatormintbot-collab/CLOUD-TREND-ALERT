@@ -90,7 +90,8 @@ export class Scanner {
 
     const direction = evalRes.direction;
 
-    if (!this.store.canSendSignal({ symbol, timeframe, direction })) return;
+    // cooldown applies to AUTO only
+    if (!manualRequest && !this.store.canSendSignal({ symbol, timeframe, direction })) return;
 
     const entryMid = candles[candles.length - 1].close; // LOCKED: close candle CLOSED
     const levels = computeLevelsLocked({
@@ -108,7 +109,7 @@ export class Scanner {
       macroBias: macro.bias
     });
 
-    // 4h rule: send only if score >= 75 (secondary only)
+    // 4h rule: secondary timeframe must meet minimum score
     if (timeframe === this.env.SECONDARY_TIMEFRAME && score.finalScore < this.env.SECONDARY_MIN_SCORE) {
       return;
     }
@@ -167,8 +168,14 @@ export class Scanner {
   }
 
   async scanOnDemand({ symbol, timeframe, chatId }) {
-    // timeframe null => scan all primary & pick best 1-3
-    const tfs = timeframe ? [timeframe] : this.env.SCAN_TIMEFRAMES;
+    // timeframe null => scan primary + secondary (4h) and pick best
+    const primaryTfs = this.env.SCAN_TIMEFRAMES;
+    const secondaryTf = this.env.SECONDARY_TIMEFRAME;
+    const tfs = timeframe ? [timeframe] : [...primaryTfs, secondaryTf].filter(Boolean);
+
+    const fourHEliteScore = Number(this.env.SECONDARY_MIN_SCORE ?? 80);
+    const fourHMargin = Number(this.env.FOUR_H_MARGIN_OVER_INTRADAY ?? 5);
+    const rotateMinutes = Number(this.env.ROTATE_EXCLUDE_MINUTES ?? 30);
 
     let symbols = [];
     if (symbol) {
@@ -197,9 +204,9 @@ export class Scanner {
 
         const direction = evalRes.direction;
 
-        if (!this.store.canSendSignal({ symbol: s, timeframe: tf, direction })) {
-          continue;
-        }
+        // On-demand has NO daily cap and NO cooldown gate.
+        // But do not create duplicate running position for the same symbol+tf.
+        if (this._hasRunningPosition(s, tf)) continue;
 
         const entryMid = candles[candles.length - 1].close;
         const levels = computeLevelsLocked({
@@ -217,7 +224,7 @@ export class Scanner {
           macroBias: macro.bias
         });
 
-        if (tf === this.env.SECONDARY_TIMEFRAME && score.finalScore < this.env.SECONDARY_MIN_SCORE) {
+        if (tf === this.env.SECONDARY_TIMEFRAME && score.finalScore < fourHEliteScore) {
           continue;
         }
 
@@ -244,7 +251,55 @@ export class Scanner {
       };
     }
 
-    const top = rankCandidates(candidates, 1)[0];
+    // Rank candidates (keep a short list for selection logic)
+    const ranked = rankCandidates(candidates, Math.min(10, candidates.length));
+
+    // Selection rules:
+    // - /scan <SYMBOL> (no TF): prefer intraday (15m/30m/1h). Allow 4h only if elite AND clearly better.
+    // - /scan (no args): allow 4h if elite; apply rotation so the same best symbol isn't repeated.
+    // - /scan <SYMBOL> <TF>: strict TF (tfs already constrained)
+
+    let chosen = null;
+
+    if (symbol && !timeframe) {
+      // best intraday
+      const intraday = ranked.filter((c) => c.timeframe !== secondaryTf);
+      const bestIntraday = intraday[0] ?? null;
+
+      const best4h = ranked.find((c) => c.timeframe === secondaryTf) ?? null;
+      if (
+        best4h &&
+        best4h.score?.finalScore >= fourHEliteScore &&
+        (!bestIntraday || best4h.score.finalScore >= (bestIntraday.score?.finalScore ?? 0) + fourHMargin)
+      ) {
+        chosen = best4h;
+      } else {
+        chosen = bestIntraday;
+      }
+    } else if (!symbol && !timeframe) {
+      // rotation for /scan (no args)
+      const last = this.store.getOnDemandLast(chatId);
+      const shouldExclude =
+        last &&
+        last.symbol &&
+        (Date.now() - (last.ts ?? 0)) / 60000 < rotateMinutes;
+
+      if (shouldExclude) {
+        chosen = ranked.find((c) => c.symbol !== last.symbol) ?? ranked[0];
+      } else {
+        chosen = ranked[0];
+      }
+    } else {
+      chosen = ranked[0];
+    }
+
+    const top = chosen;
+    if (!top) {
+      return {
+        ok: false,
+        reasons: ["No valid setup found (LOCKED entry rules)"]
+      };
+    }
 
     const signal = {
       symbol: top.symbol,
@@ -275,14 +330,29 @@ export class Scanner {
       openedAt: Date.now()
     };
 
-    this.store.markSignalSent({
-      symbol: signal.symbol,
-      timeframe: signal.timeframe,
-      direction: signal.direction
-    });
+    // On-demand: DO NOT increment dailyCount (no daily limit).
+    // But we still set cooldown timestamp to avoid immediate duplicate picks in AUTO / logs.
+    try {
+      const key = `${signal.symbol}:${signal.timeframe}:${signal.direction}`;
+      if (this.store?.state?.cooldown) {
+        this.store.state.cooldown[key] = Date.now();
+        this.store.save();
+      }
+    } catch {
+      // ignore
+    }
+
     this.store.appendSignalAudit({ ...signal, manualRequest: true, requestedByChat: chatId });
     this.store.upsertPosition(pos);
 
+    // Save last pick for /scan rotation
+    this.store.setOnDemandLast(chatId, { symbol: signal.symbol, ts: Date.now() });
+
     return { ok: true, signal };
+  }
+
+  _hasRunningPosition(symbol, timeframe) {
+    const running = this.store.listRunning();
+    return running.some((p) => p.symbol === symbol && p.timeframe === timeframe);
   }
 }

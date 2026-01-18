@@ -11,6 +11,9 @@ export class BinanceFutures {
       timeoutMs: env.REST_TIMEOUT_MS,
       retryMax: env.REST_RETRY_MAX,
       retryBaseMs: env.REST_RETRY_BASE_MS,
+      // Hardening (optional): limiter / pacing (backward compatible)
+      maxConcurrent: env.REST_MAX_CONCURRENT,
+      minIntervalMs: env.REST_MIN_INTERVAL_MS,
       logger
     });
 
@@ -78,8 +81,15 @@ export class BinanceFutures {
           wsBase: this.env.BINANCE_FUTURES_WS,
           streams: list,
           logger: this.log,
+
+          // Reconnect hardening (already supported)
           backoffBaseMs: this.env.WS_BACKOFF_BASE_MS,
           backoffMaxMs: this.env.WS_BACKOFF_MAX_MS,
+
+          // Heartbeat hardening (optional, backward compatible)
+          pingIntervalMs: this.env.WS_PING_INTERVAL_MS,
+          pongTimeoutMs: this.env.WS_PONG_TIMEOUT_MS,
+
           name: `klines-${idx + 1}`
         })
     );

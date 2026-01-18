@@ -42,12 +42,24 @@ export function checkLifecycle({ position, markPrice, ema55, env }) {
   if (!p.tp3Hit && hit(p.tp3)) {
     p.tp3Hit = true;
     p.status = "CLOSED";
-    events.push({ type: "TP3", action: ["Close 100%"], suggestedSL: null });
+    // Outcome is full profit if TP3 is hit
+    p.closeOutcome = "PROFIT_FULL";
+    events.push({ type: "TP3", action: ["Close 100%"], suggestedSL: null, outcome: p.closeOutcome });
   }
 
   if (p.status === "RUNNING" && hitSL()) {
     p.status = "CLOSED";
-    events.push({ type: "SL", action: ["Stop Loss hit"], suggestedSL: null });
+
+    // If TP1/TP2 was already hit, treat as partial profit closure (not a pure loss)
+    const outcome = p.tp2Hit || p.tp1Hit ? "PROFIT_PARTIAL" : "LOSS";
+    p.closeOutcome = outcome;
+
+    events.push({
+      type: "SL",
+      action: ["Stop Loss hit"],
+      suggestedSL: null,
+      outcome
+    });
   }
 
   return { events, updatedPosition: p };

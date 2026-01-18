@@ -51,7 +51,7 @@ ${EMOJI.order} Order: LIMIT (PENDING)
 ${EMOJI.entryZone} Entry Zone: ${fmt(entryZoneLow)} – ${fmt(entryZoneHigh)}
 ${EMOJI.midEntry} Mid Entry: ${fmt(entryMid)}
 ${EMOJI.sl} Stop Loss: ${fmt(sl)}
-${EMOJI.entryZone} TP1: ${fmt(tp1)}
+${EMOJI.tp1} TP1: ${fmt(tp1)}
 ${EMOJI.tp2} TP2: ${fmt(tp2)}
 ${EMOJI.tp3} TP3: ${fmt(tp3)}
 ━━━━━━━━━━━━━━━━━━
@@ -104,9 +104,17 @@ ${EMOJI.sl} Current SL: ${fmt(position.sl)}
 
 export function slCard({ position }) {
   const dirEmoji = position.direction === "LONG" ? EMOJI.long : EMOJI.short;
+
+  // If SL hits after TP1/TP2, this is NOT a full loss.
+  const outcome = position.closeOutcome;
+  const isPartialProfit = outcome === "PROFIT_PARTIAL";
+  const statusLine = isPartialProfit
+    ? `${EMOJI.closedProfit} CLOSED PROFIT (PARTIAL)`
+    : `${EMOJI.closedLoss} CLOSED LOSS`;
+
   return (
 `🤖 <b>${BOT_NAME}</b>
-${EMOJI.slHit} <b>STOP LOSS HIT</b>  ${EMOJI.closedLoss} CLOSED LOSS
+${EMOJI.slHit} <b>STOP LOSS HIT</b>  ${statusLine}
 ━━━━━━━━━━━━━━━━━━
 ${EMOJI.pair} Pair: ${position.symbol}   ${dirEmoji} ${position.direction}
 ${EMOJI.tf} Timeframe: ${position.timeframe}

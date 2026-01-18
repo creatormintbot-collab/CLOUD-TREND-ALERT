@@ -13,8 +13,17 @@ export function startDailyRecap({ env, logger, positionStore, bot }) {
 
       const all = positionStore.positions;
       const running = all.filter((p) => p.status === "RUNNING").length;
-      const closedProfit = all.filter((p) => p.status === "CLOSED" && p.win).length;
-      const closedLoss = all.filter((p) => p.status === "CLOSED" && !p.win).length;
+
+      // Prefer closeOutcome if available (PROFIT_FULL / PROFIT_PARTIAL / LOSS).
+      // Fallback to legacy boolean `win` for backward compatibility.
+      const isProfit = (p) => {
+        if (p?.closeOutcome === "PROFIT_FULL" || p?.closeOutcome === "PROFIT_PARTIAL") return true;
+        if (p?.closeOutcome === "LOSS") return false;
+        return Boolean(p?.win);
+      };
+
+      const closedProfit = all.filter((p) => p.status === "CLOSED" && isProfit(p)).length;
+      const closedLoss = all.filter((p) => p.status === "CLOSED" && !isProfit(p)).length;
 
       const signalsSent = positionStore.state.dailyCount?.[day] ?? 0;
 
