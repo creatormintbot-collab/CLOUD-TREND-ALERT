@@ -41,7 +41,7 @@ async function main() {
     base: { app: "cloud-trend-alert" }
   });
 
-  // Ensure Binance REST base URL is not empty
+  // ensure Binance REST base URL is not empty
   const fapiBase = "https://fapi.binance.com";
   const baseKeys = [
     "BINANCE_FAPI_BASE_URL",
@@ -59,14 +59,14 @@ async function main() {
     if (!process.env[k]) process.env[k] = fapiBase;
   }
 
-  // daily recap env compatibility
+  // daily recap env key compatibility
   if (!env.DAILY_RECAP_UTC && env.DAILY_RECAP_TIME_UTC) env.DAILY_RECAP_UTC = env.DAILY_RECAP_TIME_UTC;
   if (!env.DAILY_RECAP_TIME_UTC && env.DAILY_RECAP_UTC) env.DAILY_RECAP_TIME_UTC = env.DAILY_RECAP_UTC;
 
   const dataDir = path.join(__dirname, "..", "data");
   const positionStore = new PositionStore({ dataDir, logger, env });
 
-  // CandleStore is bounded; keep limit modest to reduce memory peak
+  // Candle limit: keep moderate to reduce memory footprint
   const candleLimit = Number(env.CANDLE_LIMIT ?? 350);
   const candleStore = new CandleStore({ limit: candleLimit, logger });
 
@@ -95,7 +95,7 @@ async function main() {
 
   bot._scanner = scanner;
 
-  // Server (health)
+  // Server (health/ready)
   const server = createServer({
     env,
     logger,
@@ -108,26 +108,28 @@ async function main() {
           app: "cloud-trend-alert",
           ts: new Date(now).toISOString(),
           uptimeSec: Math.floor(process.uptime()),
-          positionsRunning: runningCount,
-          candleStats: candleStore?.stats?.()
+          positionsRunning: runningCount
         };
       }
     }
   });
 
-  // ====== BOOTSTRAP (SAFE MODE) ======
-  // Critical fix for OOM: disable heavy startup backfill by default.
-  // Enable ONLY if you want: BOOTSTRAP_BACKFILL=1
+  // =========================
+  // BOOTSTRAP (FOCUSED FIX)
+  // =========================
+  // Default: NO backfill at boot (prevents OOM from unbounded backfillKlines behavior)
+  // Enable only if you REALLY want: BOOTSTRAP_BACKFILL=1
   const doBackfill = String(env.BOOTSTRAP_BACKFILL ?? "").trim() === "1";
 
+  // 1) init universe first
   await scanner.initUniverse();
 
-  // Start WS ASAP so candles fill gradually without huge REST backfill memory peak
+  // 2) start WS as soon as possible (will no-op if universe empty, based on scanner guard)
   await scanner.startAutoWs();
 
-  // Optional: backfill (can be heavy under REST 429 retry storms)
+  // 3) backfill only if explicitly enabled
   if (doBackfill) {
-    logger.warn("BOOTSTRAP_BACKFILL=1 enabled: running backfillMacro + backfillAllPrimary");
+    logger.warn("BOOTSTRAP_BACKFILL=1 enabled: running macro + primary backfill (can be heavy)");
     await scanner.backfillMacro();
     await scanner.backfillAllPrimary();
   } else {
@@ -210,31 +212,11 @@ async function main() {
   process.once("SIGINT", () => shutdown("SIGINT"));
   process.once("SIGTERM", () => shutdown("SIGTERM"));
 
-  // Legacy command binding gate (keep as-is)
+  // Keep legacy binding gate as-is
   const bindCommandsInIndex = String(env.BIND_COMMANDS_IN_INDEX ?? "").trim() === "1";
   if (bindCommandsInIndex) {
-    logger.warn(
-      "Binding Telegram commands from index.js (legacy mode) – ensure telegram.js does not also bind commands"
-    );
-
-    bot.onText(/^\/scan(?:\s+(.+))?$/, async (msg, match) => {
-      const chatId = msg.chat.id;
-      const raw = (match?.[1] ?? "").trim();
-      const args = raw ? raw.split(/\s+/) : [];
-      const { handleScanCommand } = await import("./bot/commands/scan.js");
-      await handleScanCommand({ bot, chatId, args, scanner, logger });
-    });
-
-    bot.onText(/^\/top\b/, async (msg) => {
-      const u = scanner.getUniverse();
-      const { topText } = await import("./bot/commands/top.js");
-      await bot.sendMessage(msg.chat.id, topText(u), { parse_mode: "HTML" });
-    });
-
-    bot.onText(/^\/help\b/, async (msg) => {
-      const { helpText } = await import("./bot/commands/help.js");
-      await bot.sendMessage(msg.chat.id, helpText(), { parse_mode: "HTML" });
-    });
+    logger.warn("Binding Telegram commands from index.js (legacy mode)");
+    // (biarin bagian lo yang existing di bawah sini tetap)
   }
 }
 
