@@ -42,7 +42,8 @@ export class BinanceFutures {
   }
 
   async backfillKlines(symbol, tf, limit = 300) {
-    const rows = await this.rest.klines({ symbol, interval: tf, limit });
+    const safeTf = tf || this.env.SECONDARY_TIMEFRAME || "4h";
+    const rows = await this.rest.klines({ symbol, interval: safeTf, limit });
     return rows.map((r) => ({
       openTime: Number(r[0]),
       open: Number(r[1]),

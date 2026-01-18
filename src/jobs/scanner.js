@@ -46,7 +46,7 @@ export class Scanner {
 
   async backfillMacro() {
     // BTC 4h
-    const tf = this.env.SECONDARY_TIMEFRAME;
+    const tf = this.env.SECONDARY_TIMEFRAME || "4h";
     const btc = await this.binance.backfillKlines("BTCUSDT", tf, 300);
     this.macro.btc4h = btc;
 
