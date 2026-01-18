@@ -41,8 +41,10 @@ class Semaphore {
 
 export class BinanceRest {
   constructor({ baseURL, timeoutMs, retryMax, retryBaseMs, logger, maxConcurrent = 8, minIntervalMs = 0 }) {
+    // MINIMAL FIX: ensure baseURL is absolute (prevents "Invalid URL" for relative paths like /fapi/v1/klines)
+    const safeBaseURL = baseURL || "https://fapi.binance.com";
     this.client = axios.create({
-      baseURL,
+      baseURL: safeBaseURL,
       timeout: timeoutMs,
       headers: { "User-Agent": "cloud-trend-alert/1.0" }
     });

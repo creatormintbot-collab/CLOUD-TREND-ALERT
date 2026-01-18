@@ -142,6 +142,37 @@ export function loadEnv() {
   const BINANCE_TESTNET = toBool(optional("BINANCE_TESTNET", ""), false);
 
   // =========================
+  // BINANCE FUTURES ENDPOINTS (MINIMAL FIX)
+  // =========================
+  // Required by src/exchange/binanceFutures.js (REST baseURL) + WS groups
+  const BINANCE_FUTURES_REST = optional(
+    "BINANCE_FUTURES_REST",
+    BINANCE_TESTNET ? "https://testnet.binancefuture.com" : "https://fapi.binance.com"
+  );
+  const BINANCE_FUTURES_WS = optional(
+    "BINANCE_FUTURES_WS",
+    BINANCE_TESTNET ? "wss://stream.binancefuture.com" : "wss://fstream.binance.com"
+  );
+
+  // =========================
+  // REST HARDENING DEFAULTS (backward compatible)
+  // =========================
+  const REST_TIMEOUT_MS = toInt(optional("REST_TIMEOUT_MS", ""), 15000);
+  const REST_RETRY_MAX = toInt(optional("REST_RETRY_MAX", ""), 2);
+  const REST_RETRY_BASE_MS = toInt(optional("REST_RETRY_BASE_MS", ""), 250);
+  const REST_MAX_CONCURRENT = toInt(optional("REST_MAX_CONCURRENT", ""), 8);
+  const REST_MIN_INTERVAL_MS = toInt(optional("REST_MIN_INTERVAL_MS", ""), 0);
+
+  // =========================
+  // WS HARDENING DEFAULTS (backward compatible)
+  // =========================
+  const WS_MAX_STREAMS_PER_SOCKET = toInt(optional("WS_MAX_STREAMS_PER_SOCKET", ""), 180);
+  const WS_BACKOFF_BASE_MS = toInt(optional("WS_BACKOFF_BASE_MS", ""), 500);
+  const WS_BACKOFF_MAX_MS = toInt(optional("WS_BACKOFF_MAX_MS", ""), 15000);
+  const WS_PING_INTERVAL_MS = toInt(optional("WS_PING_INTERVAL_MS", ""), 15000);
+  const WS_PONG_TIMEOUT_MS = toInt(optional("WS_PONG_TIMEOUT_MS", ""), 30000);
+
+  // =========================
   // LOGGING (MINIMAL FIX)
   // =========================
   // Pino butuh level yang valid. Jika env tidak ada, fallback ke "info".
@@ -182,6 +213,20 @@ export function loadEnv() {
     BINANCE_API_KEY,
     BINANCE_API_SECRET,
     BINANCE_TESTNET,
+    BINANCE_FUTURES_REST,
+    BINANCE_FUTURES_WS,
+
+    REST_TIMEOUT_MS,
+    REST_RETRY_MAX,
+    REST_RETRY_BASE_MS,
+    REST_MAX_CONCURRENT,
+    REST_MIN_INTERVAL_MS,
+
+    WS_MAX_STREAMS_PER_SOCKET,
+    WS_BACKOFF_BASE_MS,
+    WS_BACKOFF_MAX_MS,
+    WS_PING_INTERVAL_MS,
+    WS_PONG_TIMEOUT_MS,
 
     // logging
     LOG_LEVEL,

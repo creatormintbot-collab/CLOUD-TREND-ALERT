@@ -7,7 +7,7 @@ export class BinanceFutures {
     this.log = logger;
 
     this.rest = new BinanceRest({
-      baseURL: env.BINANCE_FUTURES_REST,
+      baseURL: env.BINANCE_FUTURES_REST || "https://fapi.binance.com",
       timeoutMs: env.REST_TIMEOUT_MS,
       retryMax: env.REST_RETRY_MAX,
       retryBaseMs: env.REST_RETRY_BASE_MS,
@@ -78,7 +78,7 @@ export class BinanceFutures {
     this.wsGroups = chunks.map(
       (list, idx) =>
         new BinanceWsGroup({
-          wsBase: this.env.BINANCE_FUTURES_WS,
+          wsBase: this.env.BINANCE_FUTURES_WS || "wss://fstream.binance.com",
           streams: list,
           logger: this.log,
 
