@@ -31,10 +31,16 @@ export class Scanner {
   }
 
   async initUniverse() {
-    if (this.universe?.length) return;
+    // NOTE: return the array so callers can rely on it (minimal behavior improvement)
+    if (this.universe?.length) return this.universe;
+
     const syms = await this.binance.topPerpByVolume(this.env.TOP_VOLUME_N);
     this.universe = syms;
     this.store.setUniverse(syms);
+
+    // helpful log for debugging WS streams=0 issue
+    this.log.info({ count: syms?.length ?? 0 }, "Universe initialized");
+    return this.universe;
   }
 
   async backfillAllPrimary() {
@@ -73,6 +79,25 @@ export class Scanner {
   }
 
   async startAutoWs() {
+    // ====== CRITICAL GUARD ======
+    // Prevent WS connect with empty streams (Binance returns 404 when streams=)
+    // This matches your logs: "streams":0 then WS 404.
+    if (!this.universe || this.universe.length === 0) {
+      // try pulling from store once (in case initUniverse was called elsewhere but state not loaded into instance)
+      const fromStore = this.store.getUniverse?.() ?? [];
+      if (Array.isArray(fromStore) && fromStore.length) {
+        this.universe = fromStore;
+      }
+    }
+
+    if (!this.universe || this.universe.length === 0) {
+      this.log.warn(
+        { streams: 0, tfs: this.env.SCAN_TIMEFRAMES },
+        "WS NOT started: universe empty (would cause streams=0 / 404)"
+      );
+      return;
+    }
+
     await this.binance.subscribeKlines({
       symbols: this.universe,
       tfs: this.env.SCAN_TIMEFRAMES,
@@ -187,7 +212,10 @@ export class Scanner {
     this.store.appendSignalAudit({ ...signal, manualRequest });
     this.store.upsertPosition(pos);
 
-    this.log.info({ symbol, timeframe, direction, score: score.finalScore, manualRequest }, "SIGNAL sent & position opened");
+    this.log.info(
+      { symbol, timeframe, direction, score: score.finalScore, manualRequest },
+      "SIGNAL sent & position opened"
+    );
   }
 
   _autoTargetChatId() {
