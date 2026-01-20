@@ -84,13 +84,14 @@ export class Commands {
       const tfArg = args[1]?.toLowerCase();
 
       let symbolUsed = symbolArg || null;
-      const rotationMode = !symbolArg;
+      // LOCKED: /scan (no pair) is batch scan (Top50→30→10→Top 1–3). No rotation note.
+      const rotationMode = false;
 
       const out = await this.progressUi.run({ chatId, userId }, async () => {
         if (!symbolArg) {
-          const { symbol, res } = await this.pipeline.scanOneBest(chatId);
-          symbolUsed = symbol;
-          return res;
+          // /scan (no pair) — batch scan
+          symbolUsed = null;
+          return this.pipeline.scanBatchBest({ limit: 3 });
         }
 
         if (symbolArg && !tfArg) {
@@ -165,6 +166,84 @@ export class Commands {
       if (out.kind !== "OK") return;
 
       const res = out.result;
+
+      // ==============================
+      // /scan (no pair) — BATCH OUTPUT
+      // ==============================
+      if (res && res.kind === "BATCH") {
+        const signals = Array.isArray(res.signals) ? res.signals : [];
+
+        // Keep existing maturity: only "send entry" for valid + minimum quality.
+        const valid = signals.filter((r) => r && r.ok && (r.score || 0) >= 70 && r.scoreLabel !== "NO SIGNAL");
+
+        // If we have at least one valid signal, publish them (Top 1–3).
+        if (valid.length) {
+          for (const sig of valid) {
+            const overlays = buildOverlays(sig);
+            const png = await renderEntryChart(sig, overlays);
+            await this.sender.sendPhoto(chatId, png);
+
+            await this.sender.sendText(chatId, entryCard(sig));
+
+            // counters
+            this.stateRepo.bumpScan(sig.tf);
+            await this.stateRepo.flush();
+
+            // log entry
+            await this.signalsRepo.logEntry({
+              source: "SCAN",
+              signal: sig,
+              meta: { chatId: String(chatId), raw: raw || "" }
+            });
+
+            // create monitored position (notify only requester chat)
+            const pos = createPositionFromSignal(sig, { source: "SCAN", notifyChatIds: [String(chatId)] });
+            this.positionsRepo.upsert(pos);
+            await this.positionsRepo.flush();
+          }
+
+          return;
+        }
+
+        // No valid signals in batch — still return best-effort top picks (explain)
+        await this.signalsRepo.logScanNoSignal({
+          chatId,
+          query: { symbol: null, tf: null, raw: raw || "" },
+          elapsedMs: out.elapsedMs,
+          meta: {
+            reason: "BATCH_NO_SIGNAL",
+            pipeline: res.meta || null
+          }
+        });
+
+        const meta = res.meta || {};
+        await this.sender.sendText(
+          chatId,
+          [
+            "CLOUD TREND ALERT",
+            "━━━━━━━━━━━━━━━━━━",
+            "\ud83e\udde0 SCAN — TOP PICKS (No high-confidence signal)",
+            `Universe: ${meta.universe ?? "N/A"} | Scanned: ${meta.top50 ?? "N/A"} | Prefilter: ${meta.top30 ?? "N/A"} | Deep: ${meta.top10 ?? "N/A"}`,
+            "",
+            "Showing explain for best candidates:"
+          ].join("\n")
+        );
+
+        const picks = Array.isArray(res.candidates) ? res.candidates.slice(0, 3) : [];
+        for (const sym of picks) {
+          try {
+            const diags = this.pipeline.explainPair(sym);
+            await this.sender.sendText(chatId, formatExplain({
+              symbol: sym,
+              diags,
+              tfExplicit: null,
+              rotationNote: false
+            }));
+          } catch {}
+        }
+
+        return;
+      }
 
       if (!res || !res.ok || res.score < 70 || res.scoreLabel === "NO SIGNAL") {
         await this.signalsRepo.logScanNoSignal({

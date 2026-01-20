@@ -6,6 +6,9 @@ export class ProgressUi {
     this.locks = new Map();     // key -> boolean
     this.lastAt = new Map();    // key -> ms
     this.THROTTLE_MS = 7000;    // hard throttle to reduce spam
+
+    // Batch /scan can take longer than single-pair rotation.
+    this.TIMEOUT_MS = 60_000;
   }
 
   _key(chatId, userId) {
@@ -54,24 +57,29 @@ export class ProgressUi {
       await this.sender.editText(chatId, msg.message_id, "🤖 Finalizing data… 90%");
       await sleep(1000);
 
-      if (elapsed() > 20_000) {
+      if (elapsed() > this.TIMEOUT_MS) {
         await this.sender.editText(chatId, msg.message_id, "⚠️ Scan timeout. Please try again.");
         return { kind: "TIMEOUT", elapsedMs: elapsed(), result: null };
       }
 
       const res = await fn();
 
-      if (elapsed() > 20_000) {
+      if (elapsed() > this.TIMEOUT_MS) {
         await this.sender.editText(chatId, msg.message_id, "⚠️ Scan timeout. Please try again.");
         return { kind: "TIMEOUT", elapsedMs: elapsed(), result: null };
       }
 
-      if (!res) {
+      const empty =
+        (res == null) ||
+        (Array.isArray(res) && res.length === 0) ||
+        (res && typeof res === "object" && Array.isArray(res.results) && res.results.length === 0);
+
+      if (empty) {
         await this.sender.editText(chatId, msg.message_id, "⚠️ No valid setup found. Try again later.");
         return { kind: "NO_SIGNAL", elapsedMs: elapsed(), result: null };
       }
 
-      await this.sender.editText(chatId, msg.message_id, "✅ AI Futures Signal Generated! 100%");
+      await this.sender.editText(chatId, msg.message_id, "✅ Scan Completed! 100%");
       return { kind: "OK", elapsedMs: elapsed(), result: res };
     } catch {
       if (msg?.message_id) {
