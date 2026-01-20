@@ -171,14 +171,31 @@ export class Commands {
       // /scan (no pair) — BATCH OUTPUT
       // ==============================
       if (res && res.kind === "BATCH") {
-        const signals = Array.isArray(res.signals) ? res.signals : [];
+        const signalsRaw = Array.isArray(res.signals) ? res.signals : [];
+
+        // Defensive: ensure batch output never repeats the same pair.
+        // This does not change strategy logic; it only prevents duplicate publishing.
+        const seenKeys = new Set();
+        const signals = [];
+        for (const s of signalsRaw) {
+          if (!s) continue;
+          const key = `${s.symbol}|${s.tf}|${s.direction || ""}`;
+          if (seenKeys.has(key)) continue;
+          seenKeys.add(key);
+          signals.push(s);
+        }
 
         // Keep existing maturity: only "send entry" for valid + minimum quality.
         const valid = signals.filter((r) => r && r.ok && (r.score || 0) >= 70 && r.scoreLabel !== "NO SIGNAL");
 
         // If we have at least one valid signal, publish them (Top 1–3).
         if (valid.length) {
+          // Extra defensive guard: never publish duplicates even if upstream reintroduces them.
+          const published = new Set();
           for (const sig of valid) {
+            const key = `${sig.symbol}|${sig.tf}|${sig.direction || ""}`;
+            if (published.has(key)) continue;
+            published.add(key);
             const overlays = buildOverlays(sig);
             const png = await renderEntryChart(sig, overlays);
             await this.sender.sendPhoto(chatId, png);
@@ -230,7 +247,12 @@ export class Commands {
         );
 
         const picks = Array.isArray(res.candidates) ? res.candidates.slice(0, 3) : [];
+        // Defensive: avoid duplicate explain blocks if candidates repeat.
+        const seenPick = new Set();
         for (const sym of picks) {
+          if (!sym) continue;
+          if (seenPick.has(sym)) continue;
+          seenPick.add(sym);
           try {
             const diags = this.pipeline.explainPair(sym);
             await this.sender.sendText(chatId, formatExplain({

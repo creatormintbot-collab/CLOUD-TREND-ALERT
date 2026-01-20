@@ -28,7 +28,10 @@ export class Pipeline {
    * - Rotation-based single-pair scan remains available via scanOneBest (not used by /scan anymore).
    */
   async scanBatchBest({ limit = 3 } = {}) {
-    const symbols = this.universe.symbols();
+    // Defensive: universe sources can occasionally contain duplicates.
+    // Keep behavior intact; only ensure uniqueness to prevent repeated pairs in /scan batch output.
+    const rawSymbols = this.universe.symbols();
+    const symbols = Array.isArray(rawSymbols) ? Array.from(new Set(rawSymbols)) : [];
     const baseTfs = Array.isArray(this.env.SCAN_TIMEFRAMES) ? [...this.env.SCAN_TIMEFRAMES] : [];
 
     // Step 1: fast-rank symbols (cheap) and pick Top50
@@ -45,9 +48,12 @@ export class Pipeline {
 
     // If the cache is cold (WS/backfill not ready), fastScore may be 0 for many symbols.
     // Fail-safe: still take a deterministic slice so /scan never becomes "empty" due to missing candles.
-    const top50 = (ranked.filter((r) => r.fast > 0).length >= 10 ? ranked.filter((r) => r.fast > 0) : ranked)
+    const top50Raw = (ranked.filter((r) => r.fast > 0).length >= 10 ? ranked.filter((r) => r.fast > 0) : ranked)
       .slice(0, 50)
       .map((r) => r.symbol);
+
+    // Defensive: ensure uniqueness of symbols in Top50.
+    const top50 = Array.from(new Set(top50Raw));
 
     // Step 2: prefilter Top30 (still cheap)
     const top30 = top50.slice(0, 30);
@@ -62,7 +68,20 @@ export class Pipeline {
     // Step 4: Top10 (deep) then Top 1–3 output
     evaluated.sort((a, b) => b.score - a.score);
     const top10 = evaluated.slice(0, 10);
-    const topOut = top10.slice(0, Math.max(1, Math.min(3, Number(limit || 3))));
+
+    // Defensive: ensure /scan batch output never repeats the same pair.
+    // Keep the original order (score-sorted) and just skip duplicates.
+    const maxOut = Math.max(1, Math.min(3, Number(limit || 3)));
+    const seenOut = new Set();
+    const topOut = [];
+    for (const r of top10) {
+      if (!r) continue;
+      const key = `${r.symbol}|${r.tf}|${r.direction || ""}`;
+      if (seenOut.has(key)) continue;
+      seenOut.add(key);
+      topOut.push(r);
+      if (topOut.length >= maxOut) break;
+    }
 
     // Cache for /top (best-effort, non-breaking)
     try {
