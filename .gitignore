@@ -1,8 +1,20 @@
-node_modules/
+# secrets
 .env
+
+# OS
+.DS_Store
+
+# node
+node_modules/
+
+# runtime data
 data/state.json
 data/positions.json
 data/scan-rotation.json
 data/signals/*.json
 data/klines/*.json
 *.log
+
+# ssh keys
+ssh/
+*.pem
