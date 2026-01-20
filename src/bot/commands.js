@@ -84,14 +84,13 @@ export class Commands {
       const tfArg = args[1]?.toLowerCase();
 
       let symbolUsed = symbolArg || null;
-      // LOCKED: /scan (no pair) is batch scan (Top50→30→10→Top 1–3). No rotation note.
-      const rotationMode = false;
+      const rotationMode = !symbolArg;
 
       const out = await this.progressUi.run({ chatId, userId }, async () => {
         if (!symbolArg) {
-          // /scan (no pair) — batch scan
-          symbolUsed = null;
-          return this.pipeline.scanBatchBest({ limit: 3 });
+          const { symbol, res } = await this.pipeline.scanOneBest(chatId);
+          symbolUsed = symbol;
+          return res;
         }
 
         if (symbolArg && !tfArg) {
@@ -166,106 +165,6 @@ export class Commands {
       if (out.kind !== "OK") return;
 
       const res = out.result;
-
-      // ==============================
-      // /scan (no pair) — BATCH OUTPUT
-      // ==============================
-      if (res && res.kind === "BATCH") {
-        const signalsRaw = Array.isArray(res.signals) ? res.signals : [];
-
-        // Defensive: ensure batch output never repeats the same pair.
-        // This does not change strategy logic; it only prevents duplicate publishing.
-        const seenKeys = new Set();
-        const signals = [];
-        for (const s of signalsRaw) {
-          if (!s) continue;
-          const key = `${s.symbol}|${s.tf}|${s.direction || ""}`;
-          if (seenKeys.has(key)) continue;
-          seenKeys.add(key);
-          signals.push(s);
-        }
-
-        // Keep existing maturity: only "send entry" for valid + minimum quality.
-        const valid = signals.filter((r) => r && r.ok && (r.score || 0) >= 70 && r.scoreLabel !== "NO SIGNAL");
-
-        // If we have at least one valid signal, publish them (Top 1–3).
-        if (valid.length) {
-          // Extra defensive guard: never publish duplicates even if upstream reintroduces them.
-          const published = new Set();
-          for (const sig of valid) {
-            const key = `${sig.symbol}|${sig.tf}|${sig.direction || ""}`;
-            if (published.has(key)) continue;
-            published.add(key);
-            const overlays = buildOverlays(sig);
-            const png = await renderEntryChart(sig, overlays);
-            await this.sender.sendPhoto(chatId, png);
-
-            await this.sender.sendText(chatId, entryCard(sig));
-
-            // counters
-            this.stateRepo.bumpScan(sig.tf);
-            await this.stateRepo.flush();
-
-            // log entry
-            await this.signalsRepo.logEntry({
-              source: "SCAN",
-              signal: sig,
-              meta: { chatId: String(chatId), raw: raw || "" }
-            });
-
-            // create monitored position (notify only requester chat)
-            const pos = createPositionFromSignal(sig, { source: "SCAN", notifyChatIds: [String(chatId)] });
-            this.positionsRepo.upsert(pos);
-            await this.positionsRepo.flush();
-          }
-
-          return;
-        }
-
-        // No valid signals in batch — still return best-effort top picks (explain)
-        await this.signalsRepo.logScanNoSignal({
-          chatId,
-          query: { symbol: null, tf: null, raw: raw || "" },
-          elapsedMs: out.elapsedMs,
-          meta: {
-            reason: "BATCH_NO_SIGNAL",
-            pipeline: res.meta || null
-          }
-        });
-
-        const meta = res.meta || {};
-        await this.sender.sendText(
-          chatId,
-          [
-            "CLOUD TREND ALERT",
-            "━━━━━━━━━━━━━━━━━━",
-            "\ud83e\udde0 SCAN — TOP PICKS (No high-confidence signal)",
-            `Universe: ${meta.universe ?? "N/A"} | Scanned: ${meta.top50 ?? "N/A"} | Prefilter: ${meta.top30 ?? "N/A"} | Deep: ${meta.top10 ?? "N/A"}`,
-            "",
-            "Showing explain for best candidates:"
-          ].join("\n")
-        );
-
-        const picks = Array.isArray(res.candidates) ? res.candidates.slice(0, 3) : [];
-        // Defensive: avoid duplicate explain blocks if candidates repeat.
-        const seenPick = new Set();
-        for (const sym of picks) {
-          if (!sym) continue;
-          if (seenPick.has(sym)) continue;
-          seenPick.add(sym);
-          try {
-            const diags = this.pipeline.explainPair(sym);
-            await this.sender.sendText(chatId, formatExplain({
-              symbol: sym,
-              diags,
-              tfExplicit: null,
-              rotationNote: false
-            }));
-          } catch {}
-        }
-
-        return;
-      }
 
       if (!res || !res.ok || res.score < 70 || res.scoreLabel === "NO SIGNAL") {
         await this.signalsRepo.logScanNoSignal({

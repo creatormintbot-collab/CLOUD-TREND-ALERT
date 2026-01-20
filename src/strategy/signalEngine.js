@@ -157,8 +157,6 @@ export function evaluateSignal({ symbol, tf, klines, thresholds, env, isAuto }) 
     symbol,
     tf,
     direction: core.direction,
-    // Stable key (helps defensive dedupe upstream without changing strategy rules)
-    signalKey: `${symbol}|${tf}|${core.direction}`,
     candleCloseTime: core.last.closeTime,
     score: core.fin.total,
     scoreLabel: core.fin.label,
@@ -201,10 +199,14 @@ export function explainSignal({ symbol, tf, klines, thresholds, isAuto, secondar
 
   const issues = [];
 
-  const isValidSetup = !!core.direction && !!core.pullbackOk && Number(core.fin.total || 0) >= 70;
+  const isValidSetup =
+    !!core.direction && !!core.pullbackOk && Number(core.fin.total || 0) >= 70;
 
   // secondary blocked rule
-  const secondaryBlocked = secondaryMinScore != null && isValidSetup && Number(core.fin.total || 0) < Number(secondaryMinScore);
+  const secondaryBlocked =
+    secondaryMinScore != null &&
+    isValidSetup &&
+    Number(core.fin.total || 0) < Number(secondaryMinScore);
 
   const blocked = !!secondaryBlocked;
   const blockReason = blocked ? `Secondary filter (score < ${secondaryMinScore})` : null;

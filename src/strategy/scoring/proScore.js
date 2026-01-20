@@ -1,8 +1,7 @@
 import { clamp } from "../../utils/math.js";
 
 export function macdGate({ direction, hist }) {
-  const n = hist?.length || 0;
-  if (n < 3) return false;
+  const n = hist.length;
   const h0 = hist[n - 1], h1 = hist[n - 2], h2 = hist[n - 3];
   if (h0 == null || h1 == null || h2 == null) return false;
 

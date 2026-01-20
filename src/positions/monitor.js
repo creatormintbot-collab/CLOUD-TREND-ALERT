@@ -13,11 +13,6 @@ function limitConcurrency(n) {
   return (fn) => new Promise((resolve, reject) => { queue.push({ fn, resolve, reject }); next(); });
 }
 
-function toNum(v) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-}
-
 export class Monitor {
   constructor({ rest, positionsRepo, stateRepo, signalsRepo, sender, cards }) {
     this.rest = rest;
@@ -35,37 +30,23 @@ export class Monitor {
 
     const results = await Promise.all(
       active.map((pos) => this.run(async () => {
+        if (pos.status === "CLOSED") return null;
+
+        let price = null;
         try {
-          if (!pos || typeof pos !== "object") return null;
-          if (pos.status === "CLOSED") return null;
-
-          let price = null;
-          try {
-            const p = await this.rest.premiumIndex({ symbol: pos.symbol });
-            price = toNum(p?.markPrice);
-          } catch {
-            price = toNum(pos?.levels?.entryMid ?? pos?.entryMid ?? pos?.entry);
-          }
-
-          if (price === null) return null;
-
-          const tp = applyTP(pos, price);
-          if (tp.changed) return { pos, event: tp.event, price };
-
-          const sl = applySL(pos, price);
-          if (sl.changed) return { pos, event: sl.event, price };
-
-          return null;
-        } catch (err) {
-          console.error(JSON.stringify({
-            ts: new Date().toISOString(),
-            level: "error",
-            msg: "monitor_tick_pos_failed",
-            symbol: pos?.symbol,
-            err: String(err?.message || err),
-          }));
-          return null;
+          const p = await this.rest.premiumIndex({ symbol: pos.symbol });
+          price = Number(p?.markPrice);
+        } catch {
+          price = Number(pos.levels.entryMid);
         }
+
+        const tp = applyTP(pos, price);
+        if (tp.changed) return { pos, event: tp.event, price };
+
+        const sl = applySL(pos, price);
+        if (sl.changed) return { pos, event: sl.event, price };
+
+        return null;
       }))
     );
 

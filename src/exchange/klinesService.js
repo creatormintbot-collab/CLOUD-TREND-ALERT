@@ -97,27 +97,19 @@ export class KlinesService {
     const symList = (symbols || []).map((x) => String(x).toUpperCase());
     const tfList = (tfs || []).map(normalizeInterval);
 
-    // Strategy needs long lookback (EMA200 etc...) so keep this aligned.
-    // We use a fixed minimum here to avoid pulling full backfillLimit when cache is already fresh.
-    const MIN_NEED = 220;
-
     for (const symbol of symList) {
-      // small parallelism per symbol (typically 4 TFs) to keep /scan batch fast
-      await Promise.all(tfList.map(async (tf) => {
+      for (const tf of tfList) {
         try {
           const tfMs = intervalToMs(tf);
           const existing = this.getCandles(symbol, tf);
           const lastClose = existing.length ? existing[existing.length - 1].closeTime : 0;
-
-          const stale = !lastClose || (nowMs() - Number(lastClose)) > (tfMs * 3);
-          if (existing.length >= MIN_NEED && !stale) return;
 
           // SMART sync:
           // - If cache already has >= backfillLimit, do light sync (overlap window) to avoid REST burst.
           // - Else do full backfillLimit.
           let rows = null;
 
-          if (!stale && existing.length >= this.backfillLimit && lastClose) {
+          if (existing.length >= this.backfillLimit && lastClose) {
             const overlap = tfMs * 120; // overlap window
             const startTime = Math.max(0, Number(lastClose) - overlap);
             rows = await this.rest.klines({ symbol, interval: tf, startTime, limit: 200 });
@@ -134,7 +126,7 @@ export class KlinesService {
           this.logger?.warn?.(`[klines] backfill failed ${symbol} ${tf}: ${e?.message || e}`);
           this._setCandles(symbol, tf, this.getCandles(symbol, tf), { persist: false });
         }
-      }));
+      }
     }
   }
 
