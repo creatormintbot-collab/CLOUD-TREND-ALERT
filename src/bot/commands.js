@@ -179,27 +179,29 @@ export class Commands {
         // If we have at least one valid signal, publish them (Top 1–3).
         if (valid.length) {
           for (const sig of valid) {
-            const overlays = buildOverlays(sig);
-            const png = await renderEntryChart(sig, overlays);
-            await this.sender.sendPhoto(chatId, png);
+            try {
+              const overlays = buildOverlays(sig);
+              const png = await renderEntryChart(sig, overlays);
+              await this.sender.sendPhoto(chatId, png);
 
-            await this.sender.sendText(chatId, entryCard(sig));
+              await this.sender.sendText(chatId, entryCard(sig));
 
-            // counters
-            this.stateRepo.bumpScan(sig.tf);
-            await this.stateRepo.flush();
+              // counters
+              this.stateRepo.bumpScan(sig.tf);
+              await this.stateRepo.flush();
 
-            // log entry
-            await this.signalsRepo.logEntry({
-              source: "SCAN",
-              signal: sig,
-              meta: { chatId: String(chatId), raw: raw || "" }
-            });
+              // log entry
+              await this.signalsRepo.logEntry({
+                source: "SCAN",
+                signal: sig,
+                meta: { chatId: String(chatId), raw: raw || "" }
+              });
 
-            // create monitored position (notify only requester chat)
-            const pos = createPositionFromSignal(sig, { source: "SCAN", notifyChatIds: [String(chatId)] });
-            this.positionsRepo.upsert(pos);
-            await this.positionsRepo.flush();
+              // create monitored position (notify only requester chat)
+              const pos = createPositionFromSignal(sig, { source: "SCAN", notifyChatIds: [String(chatId)] });
+              this.positionsRepo.upsert(pos);
+              await this.positionsRepo.flush();
+            } catch {}
           }
 
           return;
