@@ -1,29 +1,19 @@
-export const BOT_NAME = "CLOUD TREND ALERT";
+import path from "node:path";
+import fs from "node:fs";
 
-export const EMOJI = {
-  pair: "🪙",
-  long: "🟢",
-  short: "🔴",
-  tf: "⏱️",
-  order: "📌",
+export const ROOT_DIR = process.cwd();
+export const DATA_DIR = path.join(ROOT_DIR, "data");
+export const SIGNALS_DIR = path.join(DATA_DIR, "signals");
+export const KLINES_DIR = path.join(DATA_DIR, "klines");
 
-  entryZone: "🎯",
-  midEntry: "🧮",
-  sl: "🛡️",
-
-  tp1: "✅",
-  tp2: "🔥",
-  tp3: "🏆",
-  slHit: "🛑",
-
-  brain: "🧠",
-  factors: "📊",
-  fvg: "🧩",
-  macd: "📉",
-  volume: "🔊",
-  macro: "🌍",
-
-  running: "🟡",
-  closedProfit: "🟢",
-  closedLoss: "🔴"
+export const STATUS = {
+  ENTRY: "ENTRY",
+  RUNNING: "RUNNING",
+  CLOSED: "CLOSED"
 };
+
+export function ensureDirs() {
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  if (!fs.existsSync(SIGNALS_DIR)) fs.mkdirSync(SIGNALS_DIR, { recursive: true });
+  if (!fs.existsSync(KLINES_DIR)) fs.mkdirSync(KLINES_DIR, { recursive: true });
+}

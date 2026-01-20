@@ -1,210 +1,61 @@
-// src/config/env.js
-// MINIMAL PATCH: load .env for node + pm2 (tanpa refactor logic lain)
-
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
-import dotenv from "dotenv";
-
-/**
- * Load .env sekali di awal.
- * - Works for: `node src/index.js`, `node index.js`, PM2 start/restart
- * - Mencoba beberapa lokasi umum agar robust di VPS/PM2 (cwd kadang beda).
- */
-function loadDotEnvOnce() {
-  if (process.env.__DOTENV_LOADED__ === "1") return;
-
-  const __filename = fileURLToPath(import.meta.url);
-  const __dirname = path.dirname(__filename);
-
-  const candidates = [
-    process.env.DOTENV_CONFIG_PATH, // kalau user set manual
-    path.resolve(process.cwd(), ".env"), // jika pm2 dijalankan dari root repo
-    path.resolve(__dirname, "../../.env"), // src/config/env.js -> root repo
-  ].filter(Boolean);
-
-  for (const p of candidates) {
-    try {
-      if (fs.existsSync(p)) {
-        dotenv.config({ path: p });
-        process.env.__DOTENV_LOADED__ = "1";
-        process.env.__DOTENV_PATH__ = p;
-        break;
-      }
-    } catch {
-      // no-op (jangan ganggu boot)
-    }
-  }
-
-  // Jika tidak ketemu, tetap set flag supaya tidak berulang-ulang load attempt.
-  if (process.env.__DOTENV_LOADED__ !== "1") {
-    process.env.__DOTENV_LOADED__ = "1";
-    process.env.__DOTENV_PATH__ = "(not-found)";
-  }
+function num(v, d) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : d;
+}
+function bool(v, d) {
+  if (v === undefined || v === null || v === "") return d;
+  return String(v).toLowerCase() === "true" || String(v) === "1";
+}
+function list(v) {
+  if (!v) return [];
+  return String(v).split(",").map((x) => x.trim()).filter(Boolean);
 }
 
-loadDotEnvOnce();
+export const env = {
+  TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN || "",
+  ALLOWED_GROUP_IDS: list(process.env.ALLOWED_GROUP_IDS).map(String),
+  TEST_SIGNALS_CHAT_ID: process.env.TEST_SIGNALS_CHAT_ID ? String(process.env.TEST_SIGNALS_CHAT_ID) : "",
+  TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID ? String(process.env.TELEGRAM_CHAT_ID) : "",
 
-/* =========================
- * EXISTING ENV LOGIC (keep)
- * ========================= */
+  BINANCE_FUTURES_REST: process.env.BINANCE_FUTURES_REST || "https://fapi.binance.com",
+  BINANCE_FUTURES_WS: process.env.BINANCE_FUTURES_WS || "wss://fstream.binance.com/stream",
 
-function toBool(v, fallback = false) {
-  if (v === undefined || v === null || v === "") return fallback;
-  const s = String(v).trim().toLowerCase();
-  if (["1", "true", "yes", "y", "on"].includes(s)) return true;
-  if (["0", "false", "no", "n", "off"].includes(s)) return false;
-  return fallback;
-}
+  REST_TIMEOUT_MS: num(process.env.REST_TIMEOUT_MS, 8000),
+  REST_RETRY_MAX: num(process.env.REST_RETRY_MAX, 2),
+  REST_RETRY_BASE_MS: num(process.env.REST_RETRY_BASE_MS, 250),
 
-function toInt(v, fallback) {
-  if (v === undefined || v === null || v === "") return fallback;
-  const n = parseInt(String(v), 10);
-  return Number.isFinite(n) ? n : fallback;
-}
+  WS_MAX_STREAMS_PER_SOCKET: num(process.env.WS_MAX_STREAMS_PER_SOCKET, 180),
+  WS_BACKOFF_BASE_MS: num(process.env.WS_BACKOFF_BASE_MS, 500),
+  WS_BACKOFF_MAX_MS: num(process.env.WS_BACKOFF_MAX_MS, 30000),
 
-function toFloat(v, fallback) {
-  if (v === undefined || v === null || v === "") return fallback;
-  const n = parseFloat(String(v));
-  return Number.isFinite(n) ? n : fallback;
-}
+  VOLUME_MARKET: process.env.VOLUME_MARKET || "USDT",
+  USE_TOP_VOLUME: bool(process.env.USE_TOP_VOLUME, true),
+  TOP_VOLUME_N: num(process.env.TOP_VOLUME_N, 50),
+  TOP10_PER_TF: num(process.env.TOP10_PER_TF, 10),
+  SEND_TOP_N: num(process.env.SEND_TOP_N, 3),
 
-function toCsvList(v, fallback = []) {
-  if (v === undefined || v === null || v === "") return fallback;
-  return String(v)
-    .split(",")
-    .map((x) => x.trim())
-    .filter(Boolean);
-}
+  SCAN_TIMEFRAMES: list(process.env.SCAN_TIMEFRAMES || "15m,30m,1h"),
+  SECONDARY_TIMEFRAME: (process.env.SECONDARY_TIMEFRAME || "4h").toLowerCase(),
+  SECONDARY_MIN_SCORE: num(process.env.SECONDARY_MIN_SCORE, 80),
 
-function required(name) {
-  const v = process.env[name];
-  if (v === undefined || v === null || String(v).trim() === "") {
-    throw new Error(`Missing ${name}`);
-  }
-  return String(v).trim();
-}
+  MAX_SIGNALS_PER_DAY: num(process.env.MAX_SIGNALS_PER_DAY, 5),
+  COOLDOWN_MINUTES: num(process.env.COOLDOWN_MINUTES, 120),
 
-function optional(name, fallback = "") {
-  const v = process.env[name];
-  if (v === undefined || v === null) return fallback;
-  const s = String(v).trim();
-  return s === "" ? fallback : s;
-}
+  ZONE_ATR_MULT: num(process.env.ZONE_ATR_MULT, 0.15),
+  SL_ATR_MULT: num(process.env.SL_ATR_MULT, 1.6), // LOCKED validate
+  ADX_MIN: num(process.env.ADX_MIN, 18),
+  ATR_PCT_MIN: num(process.env.ATR_PCT_MIN, 0.002),
+  RSI_BULL_MIN: num(process.env.RSI_BULL_MIN, 52),
+  RSI_BEAR_MAX: num(process.env.RSI_BEAR_MAX, 48),
 
-/**
- * Jangan ubah semantics:
- * - TELEGRAM_BOT_TOKEN wajib (kalau bot telegram diaktifkan)
- * - Trading/scan already final (kita cuma pastikan env kebaca)
- */
-export function loadEnv() {
-  // =========================
-  // TELEGRAM
-  // =========================
-  const TELEGRAM_BOT_TOKEN = required("TELEGRAM_BOT_TOKEN");
-  const TELEGRAM_CHAT_ID = optional("TELEGRAM_CHAT_ID", "");
-  const ALLOWED_GROUP_IDS = toCsvList(optional("ALLOWED_GROUP_IDS", ""), []);
+  UNIVERSE_REFRESH_HOURS: num(process.env.UNIVERSE_REFRESH_HOURS, 6),
+  PRICE_MONITOR_INTERVAL_SEC: num(process.env.PRICE_MONITOR_INTERVAL_SEC, 10),
+  DAILY_RECAP: bool(process.env.DAILY_RECAP, true),
+  DAILY_RECAP_UTC: process.env.DAILY_RECAP_UTC || "00:05",
 
-  // =========================
-  // SERVER (optional)
-  // =========================
-  const PORT = toInt(optional("PORT", ""), 3000);
-  const WEBHOOK_SECRET = optional("WEBHOOK_SECRET", "");
-  const DISABLE_WEBHOOKS = toBool(optional("DISABLE_WEBHOOKS", ""), false);
+  PORT: num(process.env.PORT, 3000),
+  DISABLE_WEBHOOKS: bool(process.env.DISABLE_WEBHOOKS, true),
+  LOG_LEVEL: process.env.LOG_LEVEL || "info",
 
-  // =========================
-  // MARKET / SCAN (LOCKED)
-  // =========================
-  const VOLUME_MARKET = optional("VOLUME_MARKET", "futures"); // futures/spot (locked by your strategy)
-  const USE_TOP_VOLUME = toBool(optional("USE_TOP_VOLUME", ""), true);
-  const TOP_VOLUME_N = toInt(optional("TOP_VOLUME_N", ""), 30);
-
-  // Timeframes scan (LOCKED default)
-  const SCAN_TIMEFRAMES = toCsvList(optional("SCAN_TIMEFRAMES", ""), ["15m", "30m", "1h"]);
-
-// Secondary timeframe (LOCKED: 4H tetap aktif)
-// Dipakai untuk macro + aturan 4H min score
-const SECONDARY_TIMEFRAME = optional("SECONDARY_TIMEFRAME", "4h");
-const SECONDARY_MIN_SCORE = toInt(optional("SECONDARY_MIN_SCORE", ""), 80);
-const FOUR_H_MARGIN_OVER_INTRADAY = toInt(optional("FOUR_H_MARGIN_OVER_INTRADAY", ""), 5);
-const ROTATE_EXCLUDE_MINUTES = toInt(optional("ROTATE_EXCLUDE_MINUTES", ""), 30);
-const TEST_SIGNALS_CHAT_ID = optional("TEST_SIGNALS_CHAT_ID", "");
-
-  // =========================
-  // LIMIT / QUALITY (LOCKED)
-  // =========================
-  const MAX_SIGNALS_PER_DAY = toInt(optional("MAX_SIGNALS_PER_DAY", ""), 5);
-  const COOLDOWN_MINUTES = toInt(optional("COOLDOWN_MINUTES", ""), 45);
-
-  // =========================
-  // RECAP (UTC)
-  // =========================
-  const DAILY_RECAP = toBool(optional("DAILY_RECAP", ""), true);
-  const DAILY_RECAP_TIME_UTC = optional("DAILY_RECAP_TIME_UTC", "00:00"); // kalau existing kamu beda, tetap aman (optional)
-
-  // =========================
-  // BINANCE / EXCHANGE (optional – trading logic already running)
-  // =========================
-  const BINANCE_API_KEY = optional("BINANCE_API_KEY", "");
-  const BINANCE_API_SECRET = optional("BINANCE_API_SECRET", "");
-  const BINANCE_TESTNET = toBool(optional("BINANCE_TESTNET", ""), false);
-
-// Base URLs (prevent Invalid URL when exchange uses relative paths)
-const BINANCE_FUTURES_REST = optional("BINANCE_FUTURES_REST", "https://fapi.binance.com");
-const BINANCE_WS_BASE = optional("BINANCE_WS_BASE", "wss://fstream.binance.com");
-
-  // =========================
-  // LOGGING (MINIMAL FIX)
-  // =========================
-  // Pino butuh level yang valid. Jika env tidak ada, fallback ke "info".
-  // Ini tidak mengubah strategy, hanya mencegah crash saat boot.
-  const LOG_LEVEL = optional("LOG_LEVEL", optional("PINO_LEVEL", "info"));
-
-  // =========================
-  // MISC
-  // =========================
-  const NODE_ENV = optional("NODE_ENV", "production");
-
-  return {
-    // telegram
-    TELEGRAM_BOT_TOKEN,
-    TELEGRAM_CHAT_ID,
-    ALLOWED_GROUP_IDS,
-
-    // server
-    PORT,
-    WEBHOOK_SECRET,
-    DISABLE_WEBHOOKS,
-
-    // scan
-    VOLUME_MARKET,
-    USE_TOP_VOLUME,
-    TOP_VOLUME_N,
-    SCAN_TIMEFRAMES,
-
-    // limits
-    MAX_SIGNALS_PER_DAY,
-    COOLDOWN_MINUTES,
-
-    // recap
-    DAILY_RECAP,
-    DAILY_RECAP_TIME_UTC,
-
-    // exchange
-    BINANCE_API_KEY,
-    BINANCE_API_SECRET,
-    BINANCE_TESTNET,
-
-    // logging
-    LOG_LEVEL,
-
-    // misc
-    NODE_ENV,
-
-    // debug info (tidak mengubah logic—cuma info)
-    __DOTENV_PATH__: process.env.__DOTENV_PATH__ || "",
-  };
-}
-
-export const ENV = loadEnv();
-export default ENV;
+  AUTO_MIN_SCORE: num(process.env.AUTO_MIN_SCORE, 85)
+};

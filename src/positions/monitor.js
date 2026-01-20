@@ -1,66 +1,86 @@
-export function checkLifecycle({ position, markPrice, ema55, env }) {
-  // returns { events: [TP1|TP2|TP3|SL], updatedPosition }
-  const p = { ...position };
-  const dir = p.direction; // LONG/SHORT
-  const hit = (level) => {
-    if (dir === "LONG") return markPrice >= level;
-    return markPrice <= level;
+import { applyTP, applySL } from "./stateMachine.js";
+import { isWinOutcome } from "./outcomes.js";
+
+function limitConcurrency(n) {
+  let active = 0;
+  const queue = [];
+  const next = () => {
+    if (active >= n || !queue.length) return;
+    active++;
+    const { fn, resolve, reject } = queue.shift();
+    fn().then(resolve, reject).finally(() => { active--; next(); });
   };
-  const hitSL = () => {
-    if (dir === "LONG") return markPrice <= p.sl;
-    return markPrice >= p.sl;
-  };
+  return (fn) => new Promise((resolve, reject) => { queue.push({ fn, resolve, reject }); next(); });
+}
 
-  const events = [];
-
-  if (p.status !== "RUNNING") return { events, updatedPosition: p };
-
-  if (!p.tp1Hit && hit(p.tp1)) {
-    p.tp1Hit = true;
-    events.push({
-      type: "TP1",
-      action: ["Secure partial profit (30%)", "Move SL to BE"],
-      suggestedSL: p.entryMid
-    });
+export class Monitor {
+  constructor({ rest, positionsRepo, stateRepo, signalsRepo, sender, cards }) {
+    this.rest = rest;
+    this.positionsRepo = positionsRepo;
+    this.stateRepo = stateRepo;
+    this.signalsRepo = signalsRepo;
+    this.sender = sender;
+    this.cards = cards;
+    this.run = limitConcurrency(6);
   }
 
-  if (!p.tp2Hit && hit(p.tp2)) {
-    p.tp2Hit = true;
-    const sldist = Math.abs(p.entryMid - p.sl);
-    const suggested =
-      dir === "LONG"
-        ? Math.max(p.entryMid + 0.5 * sldist, ema55 ?? p.entryMid)
-        : Math.min(p.entryMid - 0.5 * sldist, ema55 ?? p.entryMid);
+  async tick(fallbackChatIdsToNotify = []) {
+    const active = this.positionsRepo.listActive();
+    if (!active.length) return;
 
-    events.push({
-      type: "TP2",
-      action: ["Lock more profit (total 60%)", "Trail SL recommended"],
-      suggestedSL: suggested
-    });
+    const results = await Promise.all(
+      active.map((pos) => this.run(async () => {
+        if (pos.status === "CLOSED") return null;
+
+        let price = null;
+        try {
+          const p = await this.rest.premiumIndex({ symbol: pos.symbol });
+          price = Number(p?.markPrice);
+        } catch {
+          price = Number(pos.levels.entryMid);
+        }
+
+        const tp = applyTP(pos, price);
+        if (tp.changed) return { pos, event: tp.event, price };
+
+        const sl = applySL(pos, price);
+        if (sl.changed) return { pos, event: sl.event, price };
+
+        return null;
+      }))
+    );
+
+    const events = results.filter(Boolean);
+
+    for (const ev of events) {
+      const pos = ev.pos;
+
+      if (pos.status === "CLOSED" && pos.closedAt) {
+        this.stateRepo.bumpOutcome(pos.closedAt, isWinOutcome(pos.closeOutcome));
+      }
+
+      const recipients = (Array.isArray(pos.notifyChatIds) && pos.notifyChatIds.length)
+        ? pos.notifyChatIds
+        : fallbackChatIdsToNotify;
+
+      for (const chatId of recipients) {
+        if (ev.event === "TP1") await this.sender.sendText(chatId, this.cards.tp1Card(pos));
+        else if (ev.event === "TP2") await this.sender.sendText(chatId, this.cards.tp2Card(pos));
+        else if (ev.event === "TP3") await this.sender.sendText(chatId, this.cards.tp3Card(pos));
+        else if (ev.event === "SL") await this.sender.sendText(chatId, this.cards.slCard(pos));
+      }
+
+      await this.signalsRepo.logLifecycle({
+        source: pos.source || "AUTO",
+        pos,
+        event: ev.event,
+        price: ev.price,
+        meta: { notifyChatIds: recipients.map(String) }
+      });
+
+      this.positionsRepo.upsert(pos);
+    }
+
+    await Promise.all([this.positionsRepo.flush(), this.stateRepo.flush(), this.signalsRepo.flush()]);
   }
-
-  if (!p.tp3Hit && hit(p.tp3)) {
-    p.tp3Hit = true;
-    p.status = "CLOSED";
-    // Outcome is full profit if TP3 is hit
-    p.closeOutcome = "PROFIT_FULL";
-    events.push({ type: "TP3", action: ["Close 100%"], suggestedSL: null, outcome: p.closeOutcome });
-  }
-
-  if (p.status === "RUNNING" && hitSL()) {
-    p.status = "CLOSED";
-
-    // If TP1/TP2 was already hit, treat as partial profit closure (not a pure loss)
-    const outcome = p.tp2Hit || p.tp1Hit ? "PROFIT_PARTIAL" : "LOSS";
-    p.closeOutcome = outcome;
-
-    events.push({
-      type: "SL",
-      action: ["Stop Loss hit"],
-      suggestedSL: null,
-      outcome
-    });
-  }
-
-  return { events, updatedPosition: p };
 }
