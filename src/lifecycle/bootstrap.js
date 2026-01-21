@@ -290,7 +290,7 @@ export async function bootstrap() {
   const autoJob = startAutoScanJob({ run: runAuto });
   const monitorJob = startMonitorJob({ intervalSec: env.PRICE_MONITOR_INTERVAL_SEC, run: runMonitor });
   const recapJob = startDailyRecapJob({ hhmmUTC: env.DAILY_RECAP_UTC, run: runRecap });
-  const universeJob = startUniverseRefreshJob({ hours: env.UNIVERSE_REFRESH_HOURS, run: runUniverseRefresh });
+  const universeJob = startUniverseRefreshJob({ hours: env.UNIVERSE_REFRESH_HOURS, run: runUniverseRefresh, onError: (err) => logger.error({ err }, "universe_refresh_failed") });
 
   logger.info("bootstrap_done");
 
