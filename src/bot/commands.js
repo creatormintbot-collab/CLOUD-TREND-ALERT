@@ -60,6 +60,8 @@ export class Commands {
           "CLOUD TREND ALERT — Commands",
           "• /scan",
           "• /scan BTCUSDT",
+          "• /scan BTCUSDT 15m",
+          "• /scan BTCUSDT 30m",
           "• /scan BTCUSDT 1h",
           "• /scan BTCUSDT 4h",
           "• /top",

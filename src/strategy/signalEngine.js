@@ -9,6 +9,7 @@ import { baseScore } from "./scoring/baseScore.js";
 import { proScore, macdGate } from "./scoring/proScore.js";
 import { finalScore } from "./scoring/finalScore.js";
 import { btcMacro } from "./macro/btcMacro.js";
+import { ctaProTrendGate } from "./ctaProTrend.js";
 
 function levelsFromATR({ direction, entryMid, atrVal, zoneMult, slMult }) {
   const zoneSize = atrVal * zoneMult;
@@ -25,7 +26,20 @@ function levelsFromATR({ direction, entryMid, atrVal, zoneMult, slMult }) {
   return { entryLow, entryHigh, entryMid, sl, tp1, tp2, tp3, slDist };
 }
 
-function computeCore({ symbol, tf, klines, thresholds, isAuto }) {
+function pickTrendTf(entryTf, thresholds, env) {
+  // Precedence: explicit override (thresholds/env) > derived mapping by entry TF > default "4h"
+  const explicit = String(thresholds?.TREND_TF || env?.TREND_TF || "").trim();
+  if (explicit) return explicit;
+
+  const tf = String(entryTf || "").toLowerCase();
+  if (tf === "15m") return "1h";
+  if (tf === "30m") return "4h";
+  if (tf === "1h") return "4h";
+  if (tf === "4h") return "4h";
+  return "4h";
+}
+
+function computeCore({ symbol, tf, klines, thresholds, env = {}, isAuto }) {
   const candles = klines.getCandles(symbol, tf);
   if (!candles || candles.length < 220) {
     return { ok: false, reason: "INSUFFICIENT_DATA", metrics: { have: candles?.length || 0, need: 220 } };
@@ -64,6 +78,19 @@ function computeCore({ symbol, tf, klines, thresholds, isAuto }) {
   const atrPct = atr14 / close;
   const distAtr = Math.abs(close - e21) / (atr14 || 1e-9);
   const pullbackOk = distAtr <= 0.6;
+
+  // CTA PRO TREND (optional) - HTF regime gate + direction lock (block mismatched direction)
+  const STRATEGY = String(env?.STRATEGY || thresholds?.STRATEGY || "").toUpperCase();
+  const ctaGate = ctaProTrendGate({
+    strategy: STRATEGY,
+    symbol,
+    entryTf: tf,
+    trendTf: pickTrendTf(tf, thresholds, env),
+    klines,
+    thresholds,
+    isAuto,
+    entryCandles: candles
+  });
 
   const macroBase = btcMacro({ klines, rsiBull: thresholds.RSI_BULL_MIN, rsiBear: thresholds.RSI_BEAR_MAX });
 
@@ -120,13 +147,26 @@ function computeCore({ symbol, tf, klines, thresholds, isAuto }) {
     base,
     pro,
     fin,
+    ctaGate,
     pullbackOk
   };
 }
 
-export function evaluateSignal({ symbol, tf, klines, thresholds, env, isAuto }) {
-  const core = computeCore({ symbol, tf, klines, thresholds, isAuto });
+export function evaluateSignal({ symbol, tf, klines, thresholds, env = {}, isAuto }) {
+  const core = computeCore({ symbol, tf, klines, thresholds, env, isAuto });
   if (!core.ok) return { ok: false };
+
+  // CTA: block if enabled but failed
+  if (core.ctaGate?.enabled && !core.ctaGate.ok) return { ok: false };
+
+  // CTA: direction lock mismatch => block (safer than overriding mature scoring engine)
+  if (
+    core.ctaGate?.enabled &&
+    core.ctaGate.ok &&
+    core.ctaGate.direction &&
+    core.direction &&
+    core.direction !== core.ctaGate.direction
+  ) return { ok: false };
 
   if (!core.direction) return { ok: false };
   if (!core.pullbackOk) return { ok: false };
@@ -175,8 +215,8 @@ export function evaluateSignal({ symbol, tf, klines, thresholds, env, isAuto }) 
   };
 }
 
-export function explainSignal({ symbol, tf, klines, thresholds, isAuto, secondaryMinScore }) {
-  const core = computeCore({ symbol, tf, klines, thresholds, isAuto });
+export function explainSignal({ symbol, tf, klines, thresholds, env = {}, isAuto, secondaryMinScore }) {
+  const core = computeCore({ symbol, tf, klines, thresholds, env, isAuto });
 
   if (!core.ok) {
     return {
@@ -200,7 +240,13 @@ export function explainSignal({ symbol, tf, klines, thresholds, isAuto, secondar
   const issues = [];
 
   const isValidSetup =
-    !!core.direction && !!core.pullbackOk && Number(core.fin.total || 0) >= 70;
+    !!core.direction &&
+    !!core.pullbackOk &&
+    Number(core.fin.total || 0) >= 70 &&
+    (!core.ctaGate?.enabled || (
+      !!core.ctaGate.ok &&
+      (!core.ctaGate.direction || core.direction === core.ctaGate.direction)
+    ));
 
   // secondary blocked rule
   const secondaryBlocked =
@@ -214,6 +260,18 @@ export function explainSignal({ symbol, tf, klines, thresholds, isAuto, secondar
   if (!core.direction) {
     issues.push("No clear trend (EMA55 is not decisively above/below EMA200).");
   } else {
+    if (core.ctaGate?.enabled) {
+      if (!core.ctaGate.ok) {
+        const r = core.ctaGate.reason || "CTA gate failed";
+        const reg = core.ctaGate.regime ? `Regime=${core.ctaGate.regime}` : "";
+        const st = core.ctaGate.setup?.setup ? `Setup=${core.ctaGate.setup.setup}` : "";
+        const rec = core.ctaGate.reclaim?.ok != null ? `Reclaim=${core.ctaGate.reclaim.ok ? "CONFIRMED" : "NO"}` : "";
+        issues.push(`CTA PRO Trend filter blocked: ${r}. ${[reg, st, rec].filter(Boolean).join(" ")}`);
+      } else if (core.ctaGate.direction && core.direction && core.direction !== core.ctaGate.direction) {
+        issues.push(`CTA direction lock mismatch: expected ${core.ctaGate.direction}, but local trend is ${core.direction}.`);
+      }
+    }
+
     if (!core.pullbackOk) {
       issues.push(`Pullback too far from EMA21 (distance ${core.ind.distAtr.toFixed(2)} ATR; need <= 0.60 ATR).`);
     }

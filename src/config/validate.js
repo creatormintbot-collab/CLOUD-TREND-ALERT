@@ -11,4 +11,29 @@ export function validateEnvOrThrow() {
   if (!Array.isArray(env.SCAN_TIMEFRAMES) || env.SCAN_TIMEFRAMES.length === 0) {
     throw new Error("SCAN_TIMEFRAMES invalid");
   }
+
+  // Timeframe validation (prevents silent mismatches like "15M" or "1H")
+  const allowedTfs = new Set(["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w"]);
+  const badScan = (env.SCAN_TIMEFRAMES || []).filter((tf) => !allowedTfs.has(String(tf).toLowerCase()));
+  if (badScan.length) throw new Error(`SCAN_TIMEFRAMES contains invalid timeframe(s): ${badScan.join(", ")}`);
+
+  if (env.SECONDARY_TIMEFRAME && !allowedTfs.has(String(env.SECONDARY_TIMEFRAME).toLowerCase())) {
+    throw new Error(`SECONDARY_TIMEFRAME invalid: ${env.SECONDARY_TIMEFRAME}`);
+  }
+
+  if (Array.isArray(env.AUTO_TIMEFRAMES) && env.AUTO_TIMEFRAMES.length) {
+    const badAuto = env.AUTO_TIMEFRAMES.filter((tf) => !allowedTfs.has(String(tf).toLowerCase()));
+    if (badAuto.length) throw new Error(`AUTO_TIMEFRAMES contains invalid timeframe(s): ${badAuto.join(", ")}`);
+  }
+
+  // Strategy validation (optional)
+  const strategy = String(env.STRATEGY || "").trim();
+  const allowedStrategies = new Set(["", "LEGACY", "CTA_PRO_TREND", "CTA", "PRO_TREND"]);
+  if (!allowedStrategies.has(strategy)) {
+    throw new Error(`STRATEGY invalid: ${strategy}`);
+  }
+
+  if (env.TREND_TF && !allowedTfs.has(String(env.TREND_TF).toLowerCase())) {
+    throw new Error(`TREND_TF invalid: ${env.TREND_TF}`);
+  }
 }

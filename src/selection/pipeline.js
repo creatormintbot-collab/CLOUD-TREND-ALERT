@@ -13,6 +13,32 @@ export class Pipeline {
     this.env = env;
   }
 
+  _scanTimeframes() {
+    const base = Array.isArray(this.env?.SCAN_TIMEFRAMES) ? this.env.SCAN_TIMEFRAMES : [];
+    const sec = this.env?.SECONDARY_TIMEFRAME;
+    const tfs = [...base];
+    if (sec && !tfs.includes(sec)) tfs.push(sec);
+    return tfs;
+  }
+
+  _autoTimeframes() {
+    const base = Array.isArray(this.env?.AUTO_TIMEFRAMES)
+      ? this.env.AUTO_TIMEFRAMES
+      : (Array.isArray(this.env?.SCAN_TIMEFRAMES) ? this.env.SCAN_TIMEFRAMES : []);
+    const sec = this.env?.SECONDARY_TIMEFRAME;
+    const tfs = [...base];
+    if (sec && !tfs.includes(sec)) tfs.push(sec);
+    return tfs;
+  }
+
+  _secondaryMinScore(symbol, tf) {
+    if (!tf || tf !== this.env?.SECONDARY_TIMEFRAME) return null;
+    // LOCKED exception: ETHUSDT is allowed on secondary timeframe even if below SECONDARY_MIN_SCORE
+    if (String(symbol || "").toUpperCase() === "ETHUSDT") return null;
+    return this.env?.SECONDARY_MIN_SCORE ?? null;
+  }
+
+
   topRanked() {
     return this.stateRepo.getRankCache();
   }
@@ -27,7 +53,7 @@ export class Pipeline {
   }
 
   async scanPair(symbol) {
-    const tfs = [...this.env.SCAN_TIMEFRAMES, this.env.SECONDARY_TIMEFRAME];
+    const tfs = this._scanTimeframes();
     const results = [];
 
     for (const tf of tfs) {
@@ -41,7 +67,7 @@ export class Pipeline {
       });
       if (r?.ok) {
         // 4h rule for /scan pair without explicit TF:
-        if (tf === this.env.SECONDARY_TIMEFRAME && r.score < this.env.SECONDARY_MIN_SCORE) continue;
+        if (tf === this.env.SECONDARY_TIMEFRAME && String(symbol).toUpperCase() !== "ETHUSDT" && r.score < this.env.SECONDARY_MIN_SCORE) continue;
         results.push(r);
       }
     }
@@ -64,15 +90,16 @@ export class Pipeline {
   }
 
   explainPair(symbol) {
-    const tfs = [...this.env.SCAN_TIMEFRAMES, this.env.SECONDARY_TIMEFRAME];
+    const tfs = this._scanTimeframes();
     return tfs.map((tf) =>
       explainSignal({
         symbol,
         tf,
         klines: this.klines,
         thresholds: this.thresholds,
+        env: this.env,
         isAuto: false,
-        secondaryMinScore: tf === this.env.SECONDARY_TIMEFRAME ? this.env.SECONDARY_MIN_SCORE : null
+        secondaryMinScore: this._secondaryMinScore(symbol, tf)
       })
     );
   }
@@ -83,14 +110,15 @@ export class Pipeline {
       tf,
       klines: this.klines,
       thresholds: this.thresholds,
+      env: this.env,
       isAuto: false,
-      secondaryMinScore: tf === this.env.SECONDARY_TIMEFRAME ? this.env.SECONDARY_MIN_SCORE : null
+      secondaryMinScore: this._secondaryMinScore(symbol, tf)
     });
   }
 
   async autoPickCandidates() {
     const symbols = this.universe.symbols();
-    const tfs = [...this.env.SCAN_TIMEFRAMES, this.env.SECONDARY_TIMEFRAME];
+    const tfs = this._autoTimeframes();
 
     const topUnion = new Map();
     const rankCache = [];
@@ -128,7 +156,7 @@ export class Pipeline {
       if (!macdGate({ direction: r.direction, hist: m.hist })) continue;
 
       // 4h publish rule (LOCKED)
-      if (r.tf === this.env.SECONDARY_TIMEFRAME && r.score < this.env.SECONDARY_MIN_SCORE) continue;
+      if (r.tf === this.env.SECONDARY_TIMEFRAME && String(r.symbol).toUpperCase() !== "ETHUSDT" && r.score < this.env.SECONDARY_MIN_SCORE) continue;
 
       candidates.push(r);
       rankCache.push({ symbol: r.symbol, tf: r.tf, score: r.score });

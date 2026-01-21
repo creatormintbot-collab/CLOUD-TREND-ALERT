@@ -34,9 +34,26 @@ export const env = {
   TOP10_PER_TF: num(process.env.TOP10_PER_TF, 10),
   SEND_TOP_N: num(process.env.SEND_TOP_N, 3),
 
-  SCAN_TIMEFRAMES: list(process.env.SCAN_TIMEFRAMES || "15m,30m,1h"),
+  SCAN_TIMEFRAMES: list(process.env.SCAN_TIMEFRAMES || "15m,30m,1h").map((x) => x.toLowerCase()),
   SECONDARY_TIMEFRAME: (process.env.SECONDARY_TIMEFRAME || "4h").toLowerCase(),
   SECONDARY_MIN_SCORE: num(process.env.SECONDARY_MIN_SCORE, 80),
+
+  // Strategy switch (optional). Empty = legacy scoring-only mode.
+  STRATEGY: (process.env.STRATEGY || "").trim(),
+
+  // Optional: override trend timeframe used by CTA gate (e.g. "1h" or "4h").
+  // If empty, CTA will auto-map based on entry TF (15m->1h, 30m/1h/4h->4h).
+  TREND_TF: (process.env.TREND_TF || "").toLowerCase(),
+
+  // Optional: auto-scan timeframes override (empty = use existing behaviour)
+  AUTO_TIMEFRAMES: list(process.env.AUTO_TIMEFRAMES || "").map((x) => x.toLowerCase()),
+
+  // CTA PRO TREND tuning (optional)
+  RECLAIM_M: num(process.env.RECLAIM_M, 3),
+  RECLAIM_K_AUTO: num(process.env.RECLAIM_K_AUTO, 2),
+  RECLAIM_K_SCAN: num(process.env.RECLAIM_K_SCAN, 1),
+  NO_TRADE_EMA200_ATR_K: num(process.env.NO_TRADE_EMA200_ATR_K, 0.3),
+  EXTEND_ATR_K: num(process.env.EXTEND_ATR_K, 1.5),
 
   MAX_SIGNALS_PER_DAY: num(process.env.MAX_SIGNALS_PER_DAY, 5),
   COOLDOWN_MINUTES: num(process.env.COOLDOWN_MINUTES, 120),
