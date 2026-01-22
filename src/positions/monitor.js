@@ -64,10 +64,17 @@ export class Monitor {
         : fallbackChatIdsToNotify;
 
       for (const chatId of recipients) {
-        if (ev.event === "TP1") await this.sender.sendText(chatId, this.cards.tp1Card(pos));
-        else if (ev.event === "TP2") await this.sender.sendText(chatId, this.cards.tp2Card(pos));
-        else if (ev.event === "TP3") await this.sender.sendText(chatId, this.cards.tp3Card(pos));
-        else if (ev.event === "SL") await this.sender.sendText(chatId, this.cards.slCard(pos));
+        const replyOpts = {};
+        if (pos.telegram && String(chatId) === String(pos.telegram.chatId) && pos.telegram.entryMessageId) {
+          replyOpts.replyToMessageId = pos.telegram.entryMessageId;
+          replyOpts.allow_sending_without_reply = true;
+          if (pos.telegram.threadId != null) replyOpts.threadId = pos.telegram.threadId;
+        }
+
+        if (ev.event === "TP1") await this.sender.sendText(chatId, this.cards.tp1Card(pos), replyOpts);
+        else if (ev.event === "TP2") await this.sender.sendText(chatId, this.cards.tp2Card(pos), replyOpts);
+        else if (ev.event === "TP3") await this.sender.sendText(chatId, this.cards.tp3Card(pos), replyOpts);
+        else if (ev.event === "SL") await this.sender.sendText(chatId, this.cards.slCard(pos), replyOpts);
       }
 
       await this.signalsRepo.logLifecycle({
