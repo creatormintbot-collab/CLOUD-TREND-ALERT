@@ -58,7 +58,7 @@ export function ctaProTrendGate({
 } = {}) {
   const S = String(strategy || "").toUpperCase();
   const enabled = S === "CTA_PRO_TREND" || S === "CTA" || S === "PRO_TREND";
-  if (!enabled) return { enabled: false, ok: true };
+  if (!enabled) return { enabled: false, ok: true, hardBlock: false, softFail: false };
 
   const M = Number(thresholds.RECLAIM_M ?? 3);
   const K = Number(isAuto ? (thresholds.RECLAIM_K_AUTO ?? 2) : (thresholds.RECLAIM_K_SCAN ?? 1));
@@ -74,6 +74,8 @@ export function ctaProTrendGate({
     return {
       enabled: true,
       ok: false,
+      hardBlock: true,
+      softFail: false,
       reason: "INSUFFICIENT_DATA",
       regime: null,
       direction: null,
@@ -96,7 +98,17 @@ export function ctaProTrendGate({
   const tAtr14 = tAtr[ti];
 
   if (t200 == null || t50 == null || tAtr14 == null || !Number.isFinite(tClose)) {
-    return { enabled: true, ok: false, reason: "INDICATORS_NOT_READY", regime: null, direction: null, entryTf, trendTf };
+    return {
+      enabled: true,
+      ok: false,
+      hardBlock: true,
+      softFail: false,
+      reason: "INDICATORS_NOT_READY",
+      regime: null,
+      direction: null,
+      entryTf,
+      trendTf
+    };
   }
 
   const [t50Prev, t50Now] = last2(tE50);
@@ -113,6 +125,8 @@ export function ctaProTrendGate({
     return {
       enabled: true,
       ok: false,
+      hardBlock: true,
+      softFail: false,
       reason: nearE200 ? "NO_TRADE_NEAR_EMA200" : "NEUTRAL_REGIME",
       regime,
       direction: null,
@@ -137,7 +151,17 @@ export function ctaProTrendGate({
   const eAtr14 = eAtr[ei];
 
   if (e21 == null || e50 == null || eAtr14 == null || !Number.isFinite(eClose)) {
-    return { enabled: true, ok: false, reason: "INDICATORS_NOT_READY", regime, direction, entryTf, trendTf };
+    return {
+      enabled: true,
+      ok: false,
+      hardBlock: true,
+      softFail: false,
+      reason: "INDICATORS_NOT_READY",
+      regime,
+      direction,
+      entryTf,
+      trendTf
+    };
   }
 
   // Reclaim definition
@@ -155,6 +179,8 @@ export function ctaProTrendGate({
     return {
       enabled: true,
       ok: false,
+      hardBlock: false,
+      softFail: true,
       reason: "RECLAIM_NOT_CONFIRMED",
       regime,
       direction,
@@ -167,7 +193,6 @@ export function ctaProTrendGate({
 
   // Setup detection
   const last = entry[ei];
-  const prev = entry[ei - 1];
 
   const pullback =
     direction === "LONG"
@@ -188,6 +213,8 @@ export function ctaProTrendGate({
     return {
       enabled: true,
       ok: false,
+      hardBlock: false,
+      softFail: true,
       reason: "NO_SETUP",
       regime,
       direction,
@@ -207,6 +234,8 @@ export function ctaProTrendGate({
     return {
       enabled: true,
       ok: false,
+      hardBlock: true,
+      softFail: false,
       reason: "TOO_EXTENDED",
       regime,
       direction,
@@ -221,6 +250,8 @@ export function ctaProTrendGate({
   return {
     enabled: true,
     ok: true,
+    hardBlock: false,
+    softFail: false,
     reason: null,
     regime,
     direction,

@@ -77,9 +77,14 @@ function computeCore({ symbol, tf, klines, thresholds, env = {}, isAuto }) {
 
   const atrPct = atr14 / close;
   const distAtr = Math.abs(close - e21) / (atr14 || 1e-9);
-  const pullbackOk = distAtr <= 0.6;
 
-  // CTA PRO TREND (optional) - HTF regime gate + direction lock (block mismatched direction)
+  const pbAuto = Number(thresholds.PULLBACK_MAX_ATR_AUTO ?? env.PULLBACK_MAX_ATR_AUTO ?? 0.65);
+  const pbScan = Number(thresholds.PULLBACK_MAX_ATR_SCAN ?? env.PULLBACK_MAX_ATR_SCAN ?? 0.75);
+  const pbMax = isAuto ? pbAuto : pbScan;
+
+  const pullbackOk = distAtr <= pbMax;
+
+  // CTA PRO TREND (optional) - HTF regime gate + direction lock
   const STRATEGY = String(env?.STRATEGY || thresholds?.STRATEGY || "").toUpperCase();
   const ctaGate = ctaProTrendGate({
     strategy: STRATEGY,
@@ -91,6 +96,12 @@ function computeCore({ symbol, tf, klines, thresholds, env = {}, isAuto }) {
     isAuto,
     entryCandles: candles
   });
+
+  // If CTA is enabled and provides a directional bias (BULL/BEAR), prefer that direction.
+  // This prevents countertrend "flip" on noisy entry TFs, while your score engine remains the quality gate.
+  if (ctaGate?.enabled && ctaGate?.direction) {
+    direction = ctaGate.direction;
+  }
 
   const macroBase = btcMacro({ klines, rsiBull: thresholds.RSI_BULL_MIN, rsiBear: thresholds.RSI_BEAR_MAX });
 
@@ -141,7 +152,7 @@ function computeCore({ symbol, tf, klines, thresholds, env = {}, isAuto }) {
     i,
     direction,
     ema: { e21, e55, e200 },
-    ind: { r14, atr14, adx14, atrPct, distAtr, sma20: sm[i] },
+    ind: { r14, atr14, adx14, atrPct, distAtr, pullbackMaxAtr: pbMax, sma20: sm[i] },
     macd: { ...mc, gateOk },
     macro,
     base,
@@ -156,13 +167,21 @@ export function evaluateSignal({ symbol, tf, klines, thresholds, env = {}, isAut
   const core = computeCore({ symbol, tf, klines, thresholds, env, isAuto });
   if (!core.ok) return { ok: false };
 
-  // CTA: block if enabled but failed
-  if (core.ctaGate?.enabled && !core.ctaGate.ok) return { ok: false };
+  const softMinAuto = Number(env?.CTA_SOFT_MIN_SCORE_AUTO ?? thresholds?.CTA_SOFT_MIN_SCORE_AUTO ?? thresholds?.AUTO_MIN_SCORE ?? 85);
+  const softMinScan = Number(env?.CTA_SOFT_MIN_SCORE_SCAN ?? thresholds?.CTA_SOFT_MIN_SCORE_SCAN ?? 75);
+  const softMinScore = isAuto ? softMinAuto : softMinScan;
 
-  // CTA: direction lock mismatch => block (safer than overriding mature scoring engine)
+  // CTA: if enabled and failed:
+  // - hardBlock reasons => always block
+  // - softFail reasons => allow only if score is already strong (keeps precision while avoiding "0 signal" days)
+  if (core.ctaGate?.enabled && !core.ctaGate.ok) {
+    if (core.ctaGate.hardBlock) return { ok: false };
+    if (Number(core.fin.total || 0) < softMinScore) return { ok: false };
+  }
+
+  // CTA: direction lock mismatch => always block
   if (
     core.ctaGate?.enabled &&
-    core.ctaGate.ok &&
     core.ctaGate.direction &&
     core.direction &&
     core.direction !== core.ctaGate.direction
@@ -237,16 +256,27 @@ export function explainSignal({ symbol, tf, klines, thresholds, env = {}, isAuto
     };
   }
 
+  const softMinAuto = Number(env?.CTA_SOFT_MIN_SCORE_AUTO ?? thresholds?.CTA_SOFT_MIN_SCORE_AUTO ?? thresholds?.AUTO_MIN_SCORE ?? 85);
+  const softMinScan = Number(env?.CTA_SOFT_MIN_SCORE_SCAN ?? thresholds?.CTA_SOFT_MIN_SCORE_SCAN ?? 75);
+  const softMinScore = isAuto ? softMinAuto : softMinScan;
+
   const issues = [];
+
+  const ctaOk =
+    !core.ctaGate?.enabled ||
+    (
+      // strict pass
+      (!!core.ctaGate.ok) ||
+      // soft fail allowed if score is already strong
+      (!core.ctaGate.ok && !core.ctaGate.hardBlock && Number(core.fin.total || 0) >= softMinScore)
+    ) &&
+    (!core.ctaGate?.direction || core.direction === core.ctaGate.direction);
 
   const isValidSetup =
     !!core.direction &&
     !!core.pullbackOk &&
     Number(core.fin.total || 0) >= 70 &&
-    (!core.ctaGate?.enabled || (
-      !!core.ctaGate.ok &&
-      (!core.ctaGate.direction || core.direction === core.ctaGate.direction)
-    ));
+    ctaOk;
 
   // secondary blocked rule
   const secondaryBlocked =
@@ -266,14 +296,21 @@ export function explainSignal({ symbol, tf, klines, thresholds, env = {}, isAuto
         const reg = core.ctaGate.regime ? `Regime=${core.ctaGate.regime}` : "";
         const st = core.ctaGate.setup?.setup ? `Setup=${core.ctaGate.setup.setup}` : "";
         const rec = core.ctaGate.reclaim?.ok != null ? `Reclaim=${core.ctaGate.reclaim.ok ? "CONFIRMED" : "NO"}` : "";
-        issues.push(`CTA PRO Trend filter blocked: ${r}. ${[reg, st, rec].filter(Boolean).join(" ")}`);
-      } else if (core.ctaGate.direction && core.direction && core.direction !== core.ctaGate.direction) {
-        issues.push(`CTA direction lock mismatch: expected ${core.ctaGate.direction}, but local trend is ${core.direction}.`);
+
+        if (core.ctaGate.hardBlock) {
+          issues.push(`CTA PRO Trend filter blocked: ${r}. ${[reg, st, rec].filter(Boolean).join(" ")}`);
+        } else {
+          issues.push(`CTA soft gate: ${r}. Allowed if score >= ${softMinScore}. ${[reg, st, rec].filter(Boolean).join(" ")}`);
+        }
+      }
+
+      if (core.ctaGate.direction && core.direction && core.direction !== core.ctaGate.direction) {
+        issues.push(`CTA direction lock mismatch: expected ${core.ctaGate.direction}, but local direction is ${core.direction}.`);
       }
     }
 
     if (!core.pullbackOk) {
-      issues.push(`Pullback too far from EMA21 (distance ${core.ind.distAtr.toFixed(2)} ATR; need <= 0.60 ATR).`);
+      issues.push(`Pullback too far from EMA21 (distance ${core.ind.distAtr.toFixed(2)} ATR; need <= ${Number(core.ind.pullbackMaxAtr).toFixed(2)} ATR).`);
     }
     if (core.ind.adx14 < thresholds.ADX_MIN) {
       issues.push(`ADX too low (${core.ind.adx14.toFixed(1)} < ${thresholds.ADX_MIN}).`);
