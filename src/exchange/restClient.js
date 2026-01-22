@@ -10,6 +10,19 @@ function toQuery(params) {
   return s ? `?${s}` : "";
 }
 
+
+function isAbortError(e) {
+  const name = e?.name;
+  const msg = String(e?.message || e || "");
+  return (
+    name === "AbortError" ||
+    msg.includes("AbortError") ||
+    msg.includes("aborted") ||
+    msg.includes("The operation was aborted") ||
+    msg.includes("This operation was aborted")
+  );
+}
+
 export class RestClient {
   constructor({ baseUrl, timeoutMs = 8000, retryMax = 2, retryBaseMs = 250 } = {}) {
     this.baseUrl = String(baseUrl || "").replace(/\/$/, "");
@@ -33,7 +46,15 @@ export class RestClient {
           throw err;
         }
         return await res.json();
-      } catch (e) {
+      } catch (e0) {
+        const e = isAbortError(e0)
+          ? (() => {
+              const err = new Error(`REST_TIMEOUT after ${this.timeoutMs}ms`, { cause: e0 });
+              err.code = "ETIMEDOUT";
+              return err;
+            })()
+          : e0;
+
         if (attempt >= this.retryMax) throw e;
         const backoff = this.retryBaseMs * Math.pow(2, attempt);
         const jitter = Math.floor(Math.random() * 120);

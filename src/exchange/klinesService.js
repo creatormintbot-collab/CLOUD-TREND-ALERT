@@ -123,7 +123,11 @@ export class KlinesService {
 
           this._setCandles(symbol, tf, [...existing, ...parsed], { persist: true });
         } catch (e) {
-          this.logger?.warn?.(`[klines] backfill failed ${symbol} ${tf}: ${e?.message || e}`);
+          if (isTimeoutOrAbort(e)) {
+            this.logger?.debug?.(`[klines] backfill timeout/aborted ${symbol} ${tf}: ${e?.message || e}`);
+          } else {
+            this.logger?.warn?.(`[klines] backfill failed ${symbol} ${tf}: ${e?.message || e}`);
+          }
           this._setCandles(symbol, tf, this.getCandles(symbol, tf), { persist: false });
         }
       }
@@ -211,7 +215,11 @@ export class KlinesService {
           this.logger?.warn?.(`[klines] gap patched ${symbol} ${tf} missing=${missingCount} patched=${patched.length}`);
         }
       } catch (e) {
-        this.logger?.warn?.(`[klines] gap patch failed ${symbol} ${tf}: ${e?.message || e}`);
+        if (isTimeoutOrAbort(e)) {
+      this.logger?.debug?.(`[klines] gap patch timeout/aborted ${symbol} ${tf}: ${e?.message || e}`);
+    } else {
+      this.logger?.warn?.(`[klines] gap patch failed ${symbol} ${tf}: ${e?.message || e}`);
+    }
       }
     });
 
