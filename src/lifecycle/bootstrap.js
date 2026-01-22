@@ -180,12 +180,19 @@ export async function bootstrap() {
       const overlays = buildOverlays(sig);
       const png = await renderEntryChart(sig, overlays);
 
+      const entryMessageIds = {};
+
       for (const chatId of notifyChatIds) {
         await sender.sendPhoto(chatId, png);
-        await sender.sendText(chatId, entryCard(sig));
+        const msg = await sender.sendText(chatId, entryCard(sig));
+        if (msg?.message_id) entryMessageIds[String(chatId)] = msg.message_id;
       }
 
-      const pos = createPositionFromSignal(sig, { source: "AUTO", notifyChatIds });
+      const pos = createPositionFromSignal(sig, {
+        source: "AUTO",
+        notifyChatIds,
+        telegram: Object.keys(entryMessageIds).length ? { entryMessageIds } : null
+      });
       positionsRepo.upsert(pos);
 
       stateRepo.bumpAuto(sig.tf, sig.score, sig.macro.BTC_STATE);
@@ -290,7 +297,7 @@ export async function bootstrap() {
   const autoJob = startAutoScanJob({ run: runAuto });
   const monitorJob = startMonitorJob({ intervalSec: env.PRICE_MONITOR_INTERVAL_SEC, run: runMonitor });
   const recapJob = startDailyRecapJob({ hhmmUTC: env.DAILY_RECAP_UTC, run: runRecap });
-  const universeJob = startUniverseRefreshJob({ hours: env.UNIVERSE_REFRESH_HOURS, run: runUniverseRefresh, onError: (err) => logger.error({ err }, "universe_refresh_failed") });
+  const universeJob = startUniverseRefreshJob({ hours: env.UNIVERSE_REFRESH_HOURS, run: runUniverseRefresh });
 
   logger.info("bootstrap_done");
 

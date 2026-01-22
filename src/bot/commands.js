@@ -60,8 +60,6 @@ export class Commands {
           "CLOUD TREND ALERT — Commands",
           "• /scan",
           "• /scan BTCUSDT",
-          "• /scan BTCUSDT 15m",
-          "• /scan BTCUSDT 30m",
           "• /scan BTCUSDT 1h",
           "• /scan BTCUSDT 4h",
           "• /top",
@@ -196,7 +194,7 @@ export class Commands {
       const png = await renderEntryChart(res, overlays);
       await this.sender.sendPhoto(chatId, png);
 
-      await this.sender.sendText(chatId, entryCard(res));
+      const entryMsg = await this.sender.sendText(chatId, entryCard(res));
 
       // counters
       this.stateRepo.bumpScan(res.tf);
@@ -210,7 +208,13 @@ export class Commands {
       });
 
       // create monitored position (notify only requester chat)
-      const pos = createPositionFromSignal(res, { source: "SCAN", notifyChatIds: [String(chatId)] });
+      const pos = createPositionFromSignal(res, {
+        source: "SCAN",
+        notifyChatIds: [String(chatId)],
+        telegram: entryMsg?.message_id
+          ? { entryMessageIds: { [String(chatId)]: entryMsg.message_id } }
+          : null
+      });
       this.positionsRepo.upsert(pos);
       await this.positionsRepo.flush();
     });

@@ -64,17 +64,19 @@ export class Monitor {
         : fallbackChatIdsToNotify;
 
       for (const chatId of recipients) {
-        const replyOpts = {};
-        if (pos.telegram && String(chatId) === String(pos.telegram.chatId) && pos.telegram.entryMessageId) {
-          replyOpts.replyToMessageId = pos.telegram.entryMessageId;
-          replyOpts.allow_sending_without_reply = true;
-          if (pos.telegram.threadId != null) replyOpts.threadId = pos.telegram.threadId;
-        }
+        const replyTo =
+          pos?.telegram?.entryMessageIds?.[String(chatId)] ??
+          pos?.telegram?.entryMessageId ??
+          null;
 
-        if (ev.event === "TP1") await this.sender.sendText(chatId, this.cards.tp1Card(pos), replyOpts);
-        else if (ev.event === "TP2") await this.sender.sendText(chatId, this.cards.tp2Card(pos), replyOpts);
-        else if (ev.event === "TP3") await this.sender.sendText(chatId, this.cards.tp3Card(pos), replyOpts);
-        else if (ev.event === "SL") await this.sender.sendText(chatId, this.cards.slCard(pos), replyOpts);
+        const send = replyTo
+          ? (text) => this.sender.sendTextReply(chatId, replyTo, text)
+          : (text) => this.sender.sendText(chatId, text);
+
+        if (ev.event === "TP1") await send(this.cards.tp1Card(pos));
+        else if (ev.event === "TP2") await send(this.cards.tp2Card(pos));
+        else if (ev.event === "TP3") await send(this.cards.tp3Card(pos));
+        else if (ev.event === "SL") await send(this.cards.slCard(pos));
       }
 
       await this.signalsRepo.logLifecycle({
