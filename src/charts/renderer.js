@@ -367,14 +367,18 @@ function renderWithCanvas(createCanvas, signal, overlays) {
     border(volRect);
 
     // candles coords
-    const step = priceRect.w / view.length;
-    const bodyW = Math.max(4, Math.floor(step * 0.62));
+// Reserve "future space" on the right so labels/boxes sit AFTER the last candle
+// (match reference screenshot where TP/SL/Entry tags are in the empty right-side area).
+const FUTURE_BARS = 32;
+const step = priceRect.w / (view.length + FUTURE_BARS);
+const bodyW = Math.max(4, Math.floor(step * 0.62));
+const candleEndX = priceRect.x + step * view.length;
 
     // risk/reward shaded zones on right
     const entryForBox = entryMid;
     const tpForBox = tp2 ?? tp1 ?? tp3;
     if (entryForBox !== null && sl !== null && tpForBox !== null) {
-      const xStart = priceRect.x + priceRect.w * 0.72;
+      const xStart = Math.min(priceRect.x + priceRect.w, candleEndX + step * 0.5);
       const yE = yOf(entryForBox);
       const ySL = yOf(sl);
       const yTP = yOf(tpForBox);
@@ -456,7 +460,7 @@ function renderWithCanvas(createCanvas, signal, overlays) {
     if (overlays.sma100) drawMA(overlays.sma100, "rgba(230,40,40,1)", 3);
 
     // level lines + labels
-    const labelX = priceRect.x + priceRect.w * 0.60;
+    const labelX = Math.min(candleEndX + step * 1.2, priceRect.x + priceRect.w - 240);
     const placed = [];
     const placeY = (y) => {
       let yy = y;
@@ -487,7 +491,7 @@ function renderWithCanvas(createCanvas, signal, overlays) {
     if (entryMid !== null) {
       const y = yOf(entryMid);
       dashedH(y, COLORS.blue, [10, 7], 3);
-      valueTag(labelX, placeY(y), `Limit: ${fmtPrice(entryMid)}`, COLORS.blue);
+      valueTag(labelX, placeY(y), `Entry: ${fmtPrice(entryMid)}`, COLORS.blue);
     }
 
     const tpColor = COLORS.bull;
