@@ -23,11 +23,15 @@ function ttlMsForTf(tf) {
 }
 
 function isFilled(pos) {
-  // Backward-compatible: some older positions may not have filledAt but are already RUNNING / have TP hits.
   if (!pos) return false;
-  if (Number.isFinite(Number(pos.filledAt)) && Number(pos.filledAt) > 0) return true;
+
+  const fa = Number(pos.filledAt);
+  if (Number.isFinite(fa) && fa > 0) return true;
+
+  // Backward-compatible: older positions may have RUNNING or TP flags without filledAt
   if (pos.hitTP1 || pos.hitTP2 || pos.hitTP3) return true;
   if (String(pos.status || "").toUpperCase() === "RUNNING") return true;
+
   return false;
 }
 
@@ -35,6 +39,7 @@ function inEntryZone(pos, price) {
   const p = Number(price);
   const low = Number(pos?.levels?.entryLow);
   const high = Number(pos?.levels?.entryHigh);
+
   if (!Number.isFinite(p) || !Number.isFinite(low) || !Number.isFinite(high)) return false;
 
   const lo = Math.min(low, high);
@@ -42,16 +47,48 @@ function inEntryZone(pos, price) {
   return p >= lo && p <= hi;
 }
 
-function isWinLocked(pos) {
-  // LOCKED: WIN = ≥TP1 (including SL after TP1/TP2)
-  if (!pos) return false;
-  if (pos.hitTP1 || pos.hitTP2 || pos.hitTP3) return true;
+function entryHitCardText(pos, price) {
+  const dir = String(pos?.direction || pos?.side || "").toUpperCase() === "SHORT" ? "SHORT" : "LONG";
+  const dot = dir === "LONG" ? "🟢" : "🔴";
 
-  const o = String(pos.closeOutcome || "").toUpperCase();
-  if (o === "PROFIT_FULL") return true;
-  if (o === "STOP_LOSS_AFTER_TP1") return true;
-  if (o === "STOP_LOSS_AFTER_TP2") return true;
-  return false;
+  const tf = pos?.tf || "N/A";
+  const sym = pos?.symbol || "N/A";
+
+  const low = pos?.levels?.entryLow;
+  const high = pos?.levels?.entryHigh;
+  const mid = pos?.levels?.entryMid;
+
+  const sl = (pos?.slCurrent ?? pos?.levels?.sl);
+
+  const fmt = (v) => {
+    if (v === null || v === undefined) return "N/A";
+    const n = Number(v);
+    if (!Number.isFinite(n)) return String(v);
+    if (Math.abs(n) >= 1000) return n.toFixed(2);
+    if (Math.abs(n) >= 1) return n.toFixed(4);
+    return n.toFixed(4);
+  };
+
+  return [
+    "CLOUD TREND ALERT",
+    "────────────────────────────────",
+    `✅ ENTRY HIT — ${dot} ${dir}`,
+    `🌕 Pair: ${sym}`,
+    `⏱ Timeframe: ${tf}`,
+    "",
+    "🎯 Entry Zone:",
+    `${fmt(low)} – ${fmt(high)}`,
+    "⚖️ Mid Entry:",
+    `${fmt(mid)}`,
+    "",
+    "📌 Mark Price:",
+    `${fmt(price)}`,
+    "",
+    "🛑 Stop Loss:",
+    `${fmt(sl)}`,
+    "",
+    "⚠️ Not Financial Advice",
+  ].join("\n");
 }
 
 export class Monitor {
@@ -87,7 +124,7 @@ export class Monitor {
         const filled = isFilled(pos);
 
         if (!filled) {
-          // ensure createdAt/expiresAt exist (best-effort, non-breaking)
+          // best-effort timestamps (non-breaking)
           const createdAt = Number(pos.createdAt ?? pos.created ?? pos.ts ?? pos.openedAt ?? 0) || nowMs;
           if (!pos.createdAt) pos.createdAt = createdAt;
 
@@ -97,7 +134,6 @@ export class Monitor {
           if (nowMs >= exp) {
             pos.status = "EXPIRED";
             pos.expiredAt = nowMs;
-            // keep closedAt for audit but do NOT count as WIN/LOSE
             pos.closedAt = pos.closedAt || nowMs;
             pos.closeOutcome = pos.closeOutcome || "EXPIRED";
             return { pos, event: "EXPIRED", price };
@@ -110,12 +146,11 @@ export class Monitor {
             return { pos, event: "FILLED", price };
           }
 
-          // still waiting
           pos.status = "PENDING_ENTRY";
           return null;
         }
 
-        // --- Active trade monitoring ---
+        // --- Active trade monitoring (only after FILLED) ---
         const tp = applyTP(pos, price);
         if (tp.changed) return { pos, event: tp.event, price };
 
@@ -132,8 +167,8 @@ export class Monitor {
       const pos = ev.pos;
 
       if (pos.status === "CLOSED" && pos.closedAt) {
-        const win = isWinLocked(pos) || isWinOutcome(pos.closeOutcome);
-        this.stateRepo.bumpOutcome(pos.closedAt, win);
+        // WIN/LOSE classification handled in outcomes.js (LOCKED rules)
+        this.stateRepo.bumpOutcome(pos.closedAt, isWinOutcome(pos.closeOutcome));
       }
 
       const recipients = (Array.isArray(pos.notifyChatIds) && pos.notifyChatIds.length)
@@ -154,7 +189,19 @@ export class Monitor {
         else if (ev.event === "TP2") await send(this.cards.tp2Card(pos));
         else if (ev.event === "TP3") await send(this.cards.tp3Card(pos));
         else if (ev.event === "SL") await send(this.cards.slCard(pos));
-        // FILLED / EXPIRED are tracked but do not spam chat by default.
+        else if (ev.event === "FILLED") {
+          // Send ENTRY HIT once per position (no spam)
+          if (!pos.entryHitNotifiedAt && !pos.entryHitNotified) {
+            const txt =
+              (this.cards && typeof this.cards.entryHitCard === "function")
+                ? this.cards.entryHitCard(pos, ev.price)
+                : entryHitCardText(pos, ev.price);
+            await send(txt);
+            pos.entryHitNotifiedAt = Number(pos.filledAt) || Date.now();
+            pos.entryHitNotified = true;
+          }
+        }
+        // EXPIRED is tracked in logs/state, but not sent to chat by default.
       }
 
       await this.signalsRepo.logLifecycle({
