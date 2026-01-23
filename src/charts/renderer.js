@@ -263,7 +263,7 @@ function renderWithCanvas(createCanvas, signal, overlays) {
       const w = Math.ceil(ctx.measureText(text).width + padX * 2);
       const h = 30;
       const x0 = Math.min(Math.max(x, priceRect.x + 6), priceRect.x + priceRect.w - w - 6);
-      roundRect(x, y, w, h, 7);
+      roundRect(x0, y, w, h, 7);
       ctx.fillStyle = bg;
       ctx.fill();
       ctx.lineWidth = 2;
@@ -271,7 +271,7 @@ function renderWithCanvas(createCanvas, signal, overlays) {
       ctx.stroke();
       ctx.fillStyle = "#111";
       ctx.textBaseline = "middle";
-      ctx.fillText(text, x + padX, y + h / 2 + 0.5);
+      ctx.fillText(text, x0 + padX, y + h / 2 + 0.5);
       ctx.restore();
       return { w, h };
     };
@@ -464,7 +464,8 @@ function renderWithCanvas(createCanvas, signal, overlays) {
     if (overlays.ema100) drawMA(overlays.ema100, "rgba(230,40,40,1)", 3);
     if (overlays.sma100) drawMA(overlays.sma100, "rgba(230,40,40,1)", 3);
 
-    // level lines + labels    const labelX = labelColX + 12;
+    // level lines + labels
+    const labelX = labelColX + 12;
     const placed = [];
     const placeY = (y) => {
       let yy = y;
@@ -537,7 +538,7 @@ function renderWithCanvas(createCanvas, signal, overlays) {
 
       ctx.save();
       ctx.fillStyle = col;
-      ctx.fillRect(x, y, bodyW, h);
+      ctx.fillRect(x, y, bodyWV, h);
       ctx.restore();
     }
 
