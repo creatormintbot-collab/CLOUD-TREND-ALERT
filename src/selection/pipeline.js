@@ -44,7 +44,7 @@ export class Pipeline {
   }
 
   async scanOneBest(chatId) {
-    const symbols = this.universe.symbols();
+    const symbols = (this.universe.symbolsForScan?.() || this.universe.symbols?.() || []);
     const sym = this.rotationRepo.pickNext(symbols);
     await this.rotationRepo.flush();
     if (!sym) return { symbol: null, res: null };
@@ -117,7 +117,7 @@ export class Pipeline {
   }
 
   async autoPickCandidates() {
-    const symbols = this.universe.symbols();
+    const symbols = (this.universe.symbolsForAuto?.() || this.universe.symbols?.() || []);
     const tfs = this._autoTimeframes();
 
     const topUnion = new Map();

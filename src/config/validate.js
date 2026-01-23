@@ -36,4 +36,21 @@ export function validateEnvOrThrow() {
   if (env.TREND_TF && !allowedTfs.has(String(env.TREND_TF).toLowerCase())) {
     throw new Error(`TREND_TF invalid: ${env.TREND_TF}`);
   }
+
+  // Universe validation (liquidity floor + AUTO volume gate)
+  if (env.USE_TOP_VOLUME && (!Number.isFinite(env.TOP_VOLUME_N) || Number(env.TOP_VOLUME_N) <= 0)) {
+    throw new Error("TOP_VOLUME_N must be > 0 when USE_TOP_VOLUME=true");
+  }
+  if (!Number.isFinite(env.LIQUIDITY_MIN_QUOTE_VOL_USDT) || Number(env.LIQUIDITY_MIN_QUOTE_VOL_USDT) < 0) {
+    throw new Error("LIQUIDITY_MIN_QUOTE_VOL_USDT must be >= 0");
+  }
+  if (!Number.isFinite(env.AUTO_MIN_QUOTE_VOL_USDT) || Number(env.AUTO_MIN_QUOTE_VOL_USDT) < 0) {
+    throw new Error("AUTO_MIN_QUOTE_VOL_USDT must be >= 0");
+  }
+  if (!Number.isFinite(env.AUTO_VOLUME_TOP_N) || Number(env.AUTO_VOLUME_TOP_N) < 0) {
+    throw new Error("AUTO_VOLUME_TOP_N must be >= 0");
+  }
+  if (Number(env.AUTO_VOLUME_TOP_N) > 0 && !Number.isInteger(Number(env.AUTO_VOLUME_TOP_N))) {
+    throw new Error("AUTO_VOLUME_TOP_N must be an integer");
+  }
 }

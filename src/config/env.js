@@ -31,6 +31,12 @@ export const env = {
   VOLUME_MARKET: process.env.VOLUME_MARKET || "USDT",
   USE_TOP_VOLUME: bool(process.env.USE_TOP_VOLUME, true),
   TOP_VOLUME_N: num(process.env.TOP_VOLUME_N, 50),
+
+  // Universe (liquidity floor + optional AUTO volume gate)
+  LIQUIDITY_MIN_QUOTE_VOL_USDT: num(process.env.LIQUIDITY_MIN_QUOTE_VOL_USDT, 0),
+  AUTO_VOLUME_TOP_N: num(process.env.AUTO_VOLUME_TOP_N, 0),
+  AUTO_MIN_QUOTE_VOL_USDT: num(process.env.AUTO_MIN_QUOTE_VOL_USDT, 0),
+
   TOP10_PER_TF: num(process.env.TOP10_PER_TF, 10),
   SEND_TOP_N: num(process.env.SEND_TOP_N, 3),
 

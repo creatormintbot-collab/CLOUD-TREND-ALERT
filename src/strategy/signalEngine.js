@@ -11,6 +11,103 @@ import { finalScore } from "./scoring/finalScore.js";
 import { btcMacro } from "./macro/btcMacro.js";
 import { ctaProTrendGate } from "./ctaProTrend.js";
 
+// Ichimoku (9,26,52,26) HTF compass (LOCKED): used as direction filter on 4H.
+// For /scan: NEUTRAL/UNKNOWN is allowed but penalized in score.
+// For AUTO: NEUTRAL/UNKNOWN is rejected (hard gate).
+
+function clampNum(x, lo, hi) {
+  const n = Number(x);
+  if (!Number.isFinite(n)) return lo;
+  return Math.min(hi, Math.max(lo, n));
+}
+
+function scoreLabelFromScore(score) {
+  const s = Number(score);
+  if (s >= 90) return "ELITE";
+  if (s >= 80) return "STRONG";
+  if (s >= 70) return "OK";
+  return "NO SIGNAL";
+}
+
+function _midHighLow(candles, period) {
+  const out = Array((candles || []).length).fill(null);
+  const p = Number(period);
+  if (!Array.isArray(candles) || !Number.isFinite(p) || p <= 0) return out;
+
+  for (let i = p - 1; i < candles.length; i++) {
+    let hi = -Infinity;
+    let lo = Infinity;
+    for (let j = i - p + 1; j <= i; j++) {
+      const h = Number(candles[j]?.high);
+      const l = Number(candles[j]?.low);
+      if (Number.isFinite(h) && h > hi) hi = h;
+      if (Number.isFinite(l) && l < lo) lo = l;
+    }
+    if (hi > -Infinity && lo < Infinity) out[i] = (hi + lo) / 2;
+  }
+  return out;
+}
+
+function ichimokuCompass(candles, opts = {}) {
+  const tenkanP = Number(opts.tenkan ?? 9);
+  const kijunP = Number(opts.kijun ?? 26);
+  const spanBP = Number(opts.senkouB ?? 52);
+  const disp = Number(opts.displacement ?? 26);
+
+  const need = Math.max(spanBP + disp + 5, 90);
+  if (!Array.isArray(candles) || candles.length < need) {
+    return { ok: false, bias: "UNKNOWN", reason: "INSUFFICIENT_DATA", have: Array.isArray(candles) ? candles.length : 0, need };
+  }
+
+  const tenkan = _midHighLow(candles, tenkanP);
+  const kijun = _midHighLow(candles, kijunP);
+  const spanB = _midHighLow(candles, spanBP);
+  const spanA = tenkan.map((t, i) => (t != null && kijun[i] != null ? (t + kijun[i]) / 2 : null));
+
+  const idx = candles.length - 1;
+  const leadIdx = idx - disp;
+
+  const close = Number(candles[idx]?.close);
+  const a = spanA[leadIdx];
+  const b = spanB[leadIdx];
+
+  if (!Number.isFinite(close) || a == null || b == null) {
+    return { ok: false, bias: "UNKNOWN", reason: "INDICATORS_NOT_READY" };
+  }
+
+  const cloudTop = Math.max(a, b);
+  const cloudBottom = Math.min(a, b);
+
+  const tkNow = tenkan[idx];
+  const kjNow = kijun[idx];
+  let tk = "NEUTRAL";
+  if (tkNow != null && kjNow != null) {
+    if (tkNow > kjNow) tk = "BULL";
+    else if (tkNow < kjNow) tk = "BEAR";
+  }
+
+  let bias = "NEUTRAL";
+  if (close > cloudTop && a > b) bias = "BULL";
+  else if (close < cloudBottom && a < b) bias = "BEAR";
+
+  const distPct =
+    close > cloudTop
+      ? ((close - cloudTop) / close) * 100
+      : (close < cloudBottom ? ((cloudBottom - close) / close) * 100 : 0);
+
+  return {
+    ok: true,
+    bias,
+    tk,
+    spanA: a,
+    spanB: b,
+    cloudTop,
+    cloudBottom,
+    distanceToCloudPct: distPct
+  };
+}
+
+
 function levelsFromATR({ direction, entryMid, atrVal, zoneMult, slMult }) {
   const zoneSize = atrVal * zoneMult;
   const entryLow = entryMid - zoneSize;
@@ -103,6 +200,15 @@ function computeCore({ symbol, tf, klines, thresholds, env = {}, isAuto }) {
     direction = ctaGate.direction;
   }
 
+  // Ichimoku HTF compass (LOCKED): use secondary TF (typically 4h) for direction bias.
+  const ichiTf = String(env?.SECONDARY_TIMEFRAME || "4h");
+  const ichiCandles =
+    String(tf || "").toLowerCase() === String(ichiTf || "").toLowerCase()
+      ? candles
+      : (klines?.getCandles?.(symbol, ichiTf) || []);
+  const ichimoku = { tf: ichiTf, ...ichimokuCompass(ichiCandles) };
+
+
   const macroBase = btcMacro({ klines, rsiBull: thresholds.RSI_BULL_MIN, rsiBear: thresholds.RSI_BEAR_MAX });
 
   let MACRO_PTS = 0;
@@ -159,6 +265,7 @@ function computeCore({ symbol, tf, klines, thresholds, env = {}, isAuto }) {
     pro,
     fin,
     ctaGate,
+    ichimoku,
     pullbackOk
   };
 }
@@ -187,6 +294,13 @@ export function evaluateSignal({ symbol, tf, klines, thresholds, env = {}, isAut
     core.direction !== core.ctaGate.direction
   ) return { ok: false };
 
+  // Ichimoku compass (LOCKED):
+  // - Direction mismatch => block
+  // - AUTO rejects NEUTRAL/UNKNOWN
+  if (core.ichimoku?.bias === "BULL" && core.direction && core.direction !== "LONG") return { ok: false };
+  if (core.ichimoku?.bias === "BEAR" && core.direction && core.direction !== "SHORT") return { ok: false };
+  if (isAuto && (core.ichimoku?.bias === "NEUTRAL" || core.ichimoku?.bias === "UNKNOWN")) return { ok: false };
+
   if (!core.direction) return { ok: false };
   if (!core.pullbackOk) return { ok: false };
   if (core.fin.total < 70) return { ok: false };
@@ -203,6 +317,17 @@ export function evaluateSignal({ symbol, tf, klines, thresholds, env = {}, isAut
     slMult: thresholds.SL_ATR_MULT
   });
 
+  const scoreRaw = Number(core.fin.total || 0);
+  let ichimokuPts = 0;
+
+  if (!isAuto) {
+    if (core.ichimoku?.bias === "BULL" || core.ichimoku?.bias === "BEAR") ichimokuPts = 4;
+    else if (core.ichimoku?.bias === "NEUTRAL" || core.ichimoku?.bias === "UNKNOWN") ichimokuPts = -12;
+  }
+
+  const score = clampNum(scoreRaw + ichimokuPts, 0, 100);
+  const scoreLabel = scoreLabelFromScore(score);
+
   const points = {
     EMA: core.base.parts.EMA,
     Pullback: core.base.parts.PULLBACK,
@@ -211,7 +336,8 @@ export function evaluateSignal({ symbol, tf, klines, thresholds, env = {}, isAut
     Risk: core.base.parts.RISK,
     MACD: core.pro.macdPts,
     SMA: core.pro.smaPts,
-    Macro: core.macro.MACRO_PTS
+    Macro: core.macro.MACRO_PTS,
+    Ichimoku: ichimokuPts
   };
 
   return {
@@ -220,8 +346,10 @@ export function evaluateSignal({ symbol, tf, klines, thresholds, env = {}, isAut
     tf,
     direction: core.direction,
     candleCloseTime: core.last.closeTime,
-    score: core.fin.total,
-    scoreLabel: core.fin.label,
+    score,
+    scoreRaw,
+    scoreLabel,
+    ichimoku: core.ichimoku,
     macro: { BTC_STATE: core.macro.BTC_STATE, ALT_STATE: core.macro.ALT_STATE, BIAS: core.macro.BIAS },
     points,
     levels: {
@@ -265,6 +393,23 @@ export function explainSignal({ symbol, tf, klines, thresholds, env = {}, isAuto
 
   const issues = [];
 
+  const scoreRaw = Number(core.fin.total || 0);
+  let ichimokuPts = 0;
+
+  if (!isAuto) {
+    if (core.ichimoku?.bias === "BULL" || core.ichimoku?.bias === "BEAR") ichimokuPts = 4;
+    else if (core.ichimoku?.bias === "NEUTRAL" || core.ichimoku?.bias === "UNKNOWN") ichimokuPts = -12;
+  }
+
+  const score = Math.round(clampNum(scoreRaw + ichimokuPts, 0, 100));
+  const scoreLabel = scoreLabelFromScore(score);
+
+  const ichiBias = core.ichimoku?.bias || "UNKNOWN";
+  const ichiOk =
+    (ichiBias === "BULL" && core.direction === "LONG") ||
+    (ichiBias === "BEAR" && core.direction === "SHORT") ||
+    (!isAuto && (ichiBias === "NEUTRAL" || ichiBias === "UNKNOWN"));
+
   const ctaOk =
     !core.ctaGate?.enabled ||
     (
@@ -280,13 +425,14 @@ export function explainSignal({ symbol, tf, klines, thresholds, env = {}, isAuto
     !!core.pullbackOk &&
     Number(core.fin.total || 0) >= 70 &&
     ctaOk &&
+    ichiOk &&
     (!isAuto || core.macd.gateOk);
 
   // secondary blocked rule
   const secondaryBlocked =
     secondaryMinScore != null &&
     isValidSetup &&
-    Number(core.fin.total || 0) < Number(secondaryMinScore);
+    Number(score || 0) < Number(secondaryMinScore);
 
   const blocked = !!secondaryBlocked;
   const blockReason = blocked ? `Secondary filter (score < ${secondaryMinScore})` : null;
@@ -294,6 +440,25 @@ export function explainSignal({ symbol, tf, klines, thresholds, env = {}, isAuto
   if (!core.direction) {
     issues.push("No clear trend (EMA55 is not decisively above/below EMA200).");
   } else {
+    // Ichimoku compass notes (LOCKED)
+    if (ichiBias === "UNKNOWN") {
+      issues.push(`Ichimoku compass not ready on ${core.ichimoku?.tf || (env?.SECONDARY_TIMEFRAME || "4h")} (${isAuto ? "AUTO blocked" : "score penalized"}).`);
+    } else if (ichiBias === "NEUTRAL") {
+      issues.push(`Ichimoku compass is NEUTRAL on ${core.ichimoku?.tf || (env?.SECONDARY_TIMEFRAME || "4h")} (${isAuto ? "AUTO blocked" : "score penalized"}).`);
+    } else if (ichiBias === "BULL" && core.direction && core.direction !== "LONG") {
+      issues.push(`Ichimoku bias is BULL (4H) but local direction is ${core.direction}.`);
+    } else if (ichiBias === "BEAR" && core.direction && core.direction !== "SHORT") {
+      issues.push(`Ichimoku bias is BEAR (4H) but local direction is ${core.direction}.`);
+    }
+
+    if (!ichiOk) {
+      if (isAuto && (ichiBias === "NEUTRAL" || ichiBias === "UNKNOWN")) {
+        issues.push("AUTO blocked by Ichimoku: bias must be BULL/BEAR (not NEUTRAL/UNKNOWN).");
+      } else if (core.direction) {
+        issues.push("Blocked by Ichimoku direction lock.");
+      }
+    }
+
     if (core.ctaGate?.enabled) {
       if (!core.ctaGate.ok) {
         const r = core.ctaGate.reason || "CTA gate failed";
@@ -353,8 +518,9 @@ export function explainSignal({ symbol, tf, klines, thresholds, env = {}, isAuto
     symbol,
     tf,
     ok: isValidSetup,
-    score: Math.round(core.fin.total || 0),
-    scoreLabel: core.fin.label,
+    score,
+    scoreRaw,
+    scoreLabel,
     direction: core.direction,
     blocked,
     blockReason,
@@ -368,7 +534,11 @@ export function explainSignal({ symbol, tf, klines, thresholds, env = {}, isAuto
       adx14: core.ind.adx14,
       atrPct: core.ind.atrPct,
       distAtr: core.ind.distAtr,
-      macdHist: core.macd.hist
+      macdHist: core.macd.hist,
+      ichimokuTf: core.ichimoku?.tf,
+      ichimokuBias: core.ichimoku?.bias,
+      ichimokuTk: core.ichimoku?.tk,
+      ichimokuCloudDistPct: core.ichimoku?.distanceToCloudPct
     }
   };
 }

@@ -30,7 +30,7 @@ function formatExplain({ symbol, diags, tfExplicit = null, rotationNote = false 
     "Tips:",
     "• Wait for pullback closer to EMA21.",
     "• Prefer stronger ADX / higher ATR%.",
-    "• If 4h is valid but BLOCKED, it is under the secondary filter."
+    "• If a timeframe is BLOCKED, it may be under gates (secondary, liquidity, or Ichimoku HTF)."
   ];
 
   const extra = rotationNote
@@ -98,6 +98,8 @@ export class Commands {
           "CLOUD TREND ALERT — Commands",
           "• /scan",
           "• /scan BTCUSDT",
+          "• /scan BTCUSDT 15m",
+          "• /scan BTCUSDT 30m",
           "• /scan BTCUSDT 1h",
           "• /scan BTCUSDT 4h",
           "• /top",
@@ -120,6 +122,37 @@ export class Commands {
       const args = raw ? raw.split(/\s+/).filter(Boolean) : [];
       const symbolArg = args[0]?.toUpperCase();
       const tfArg = args[1]?.toLowerCase();
+
+      // Validate timeframe (avoid wasted work / silent failures)
+      const allowedTfs = (() => {
+        const rawScan = this.env?.SCAN_TIMEFRAMES;
+        const list = Array.isArray(rawScan)
+          ? rawScan
+          : String(rawScan || "").split(",").map((x) => x.trim()).filter(Boolean);
+
+        const sec = String(this.env?.SECONDARY_TIMEFRAME || "").trim();
+        if (sec && !list.includes(sec)) list.push(sec);
+
+        // normalize
+        return list.map((x) => String(x).toLowerCase());
+      })();
+
+      if (tfArg && !allowedTfs.includes(tfArg)) {
+        await this.sender.sendText(chatId, [
+          "CLOUD TREND ALERT",
+          "━━━━━━━━━━━━━━━━━━",
+          "⚠️ INVALID TIMEFRAME",
+          `Provided: ${tfArg}`,
+          `Allowed: ${allowedTfs.join(", ") || "N/A"}`,
+          "",
+          "Usage:",
+          "• /scan BTCUSDT",
+          "• /scan BTCUSDT 15m",
+          "• /scan BTCUSDT 1h",
+          `• /scan BTCUSDT ${String(this.env?.SECONDARY_TIMEFRAME || "4h")}`
+        ].join("\n"));
+        return;
+      }
 
       // Count every /scan request (UTC day), regardless of outcome.
       try {

@@ -4,6 +4,18 @@ function keyOf(symbol, tf) { return `${symbol}|${tf}`; }
 function toNum(x) { const n = Number(x); return Number.isFinite(n) ? n : 0; }
 function nowMs() { return Date.now(); }
 
+function isTimeoutOrAbort(e) {
+  const name = String(e?.name || "");
+  const code = String(e?.code || "");
+  const msg = String(e?.message || "").toLowerCase();
+
+  if (name === "AbortError") return true;
+  if (code === "ABORT_ERR" || code === "ECONNABORTED" || code === "ETIMEDOUT" || code === "ECONNRESET") return true;
+  if (msg.includes("timeout") || msg.includes("timed out") || msg.includes("aborted")) return true;
+
+  return false;
+}
+
 function parseRestKlineRow(row) {
   return {
     openTime: Number(row[0]),
@@ -216,10 +228,10 @@ export class KlinesService {
         }
       } catch (e) {
         if (isTimeoutOrAbort(e)) {
-      this.logger?.debug?.(`[klines] gap patch timeout/aborted ${symbol} ${tf}: ${e?.message || e}`);
-    } else {
-      this.logger?.warn?.(`[klines] gap patch failed ${symbol} ${tf}: ${e?.message || e}`);
-    }
+          this.logger?.debug?.(`[klines] gap patch timeout/aborted ${symbol} ${tf}: ${e?.message || e}`);
+        } else {
+          this.logger?.warn?.(`[klines] gap patch failed ${symbol} ${tf}: ${e?.message || e}`);
+        }
       }
     });
 

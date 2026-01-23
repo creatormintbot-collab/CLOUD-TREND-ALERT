@@ -27,11 +27,29 @@ export function entryCard(sig) {
     `📊 Score: ${fmtScore(sig.score)} / 100`,
     "",
     "📊 Score Factors:",
-    `📐 EMA ${fmtSignedInt(p.EMA)} | 🌊 Pullback ${fmtSignedInt(p.Pullback)} | 📊 RSI ${fmtSignedInt(p.RSI)} | 🧱 ADX ${fmtSignedInt(p.ADX)} | 🧨 Risk ${fmtSignedInt(p.Risk)} | 📉 MACD ${fmtSignedInt(p.MACD)} | 📏 SMA ${fmtSignedInt(p.SMA)} | 🌍 Macro ${fmtSignedInt(p.Macro)}`,
+    `📐 EMA ${fmtSignedInt(p.EMA)} | 🌊 Pullback ${fmtSignedInt(p.Pullback)} | 📊 RSI ${fmtSignedInt(p.RSI)} | 🧱 ADX ${fmtSignedInt(p.ADX)} | 🧨 Risk ${fmtSignedInt(p.Risk)} | 📉 MACD ${fmtSignedInt(p.MACD)} | 📏 SMA ${fmtSignedInt(p.SMA)} | 🌍 Macro ${fmtSignedInt(p.Macro)}${(p.Ichimoku != null ? ` | ☁️ Ichimoku ${fmtSignedInt(p.Ichimoku)}` : "")}`,
     "",
     "🌍 Macro Context:",
     `₿ BTC: ${m.BTC_STATE || "NEUTRAL"} | 🪙 ALTS: ${m.ALT_STATE || "NEUTRAL"}`,
     `⚡ Bias: ${m.BIAS || "NEUTRAL"}`,
+    ...(() => {
+      const bias =
+        sig?.ichimoku?.bias ||
+        sig?.htf?.ichimokuBias ||
+        sig?.ichimokuBias ||
+        null;
+
+      const liq =
+        sig?.liquidity?.status ||
+        sig?.liquidityStatus ||
+        sig?.meta?.liquidityStatus ||
+        null;
+
+      const out = [];
+      if (bias) out.push(`☁️ HTF (4H) Ichimoku: ${String(bias).toUpperCase()}`);
+      if (liq) out.push(`💧 Liquidity: ${String(liq).toUpperCase()}`);
+      return out;
+    })(),
     "━━━━━━━━━━━━━━━━━━",
     "⚠️ Not Financial Advice"
   ].join("\n");
