@@ -123,6 +123,9 @@ export class Pipeline {
     const topUnion = new Map();
     const rankCache = [];
 
+    // Rolling cooldown per pair+tf to prevent repeats (LOCKED intent)
+    const pairTfCooldownMin = Number(this.env?.AUTO_PAIR_TF_COOLDOWN_MINUTES ?? this.env?.AUTO_COOLDOWN_MINUTES ?? 720);
+
     for (const tf of tfs) {
       const scored = symbols
         .map((s) => ({ symbol: s, tf, fast: this.ranker.fastScore(s, tf, this.thresholds) }))
@@ -137,6 +140,8 @@ export class Pipeline {
 
     const candidates = [];
     for (const row of topUnion.values()) {
+      // Skip recently-sent pair+tf (rolling window)
+      if (!this.stateRepo.canSendSymbol(`${row.symbol}|${row.tf}`, pairTfCooldownMin)) continue;
       const r = evaluateSignal({
         symbol: row.symbol,
         tf: row.tf,

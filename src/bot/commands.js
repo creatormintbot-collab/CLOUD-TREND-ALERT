@@ -40,6 +40,44 @@ function formatExplain({ symbol, diags, tfExplicit = null, rotationNote = false 
   return [...header, ...lines, ...tips, ...extra].join("\n");
 }
 
+function ttlMsForTf(tf) {
+  const t = String(tf || "").toLowerCase();
+  if (t === "15m") return 6 * 60 * 60 * 1000;   // 6h
+  if (t === "30m") return 12 * 60 * 60 * 1000;  // 12h
+  if (t === "1h") return 24 * 60 * 60 * 1000;   // 24h
+  if (t === "4h") return 24 * 60 * 60 * 1000;   // 24h
+  return 24 * 60 * 60 * 1000;
+}
+
+function formatDuplicateNotice({ symbol, tf, pos }) {
+  const status = pos?.status ? String(pos.status) : "ACTIVE";
+  const createdAt = Number(pos?.createdAt ?? 0);
+  const expiresAt = Number(pos?.expiresAt ?? 0);
+
+  const now = Date.now();
+  const minsLeft = (expiresAt && expiresAt > now) ? Math.max(0, Math.round((expiresAt - now) / 60000)) : null;
+
+  const extra =
+    minsLeft === null
+      ? ""
+      : `\n⏳ Expires In: ~${minsLeft} min`;
+
+  return [
+    "CLOUD TREND ALERT",
+    "━━━━━━━━━━━━━━━━━━",
+    "⚠️ DUPLICATE PREVENTED",
+    `🪙 Pair: ${symbol}`,
+    `⏱ Timeframe: ${tf}`,
+    `📌 Status: ${status}${extra}`,
+    "",
+    "Reason:",
+    "• An existing signal is still active for this Pair + Timeframe.",
+    "",
+    "Tip:",
+    "• Wait for it to fill/close, or scan a different pair/timeframe."
+  ].join("\n");
+}
+
 export class Commands {
   constructor({ bot, sender, progressUi, pipeline, stateRepo, positionsRepo, signalsRepo, env }) {
     this.bot = bot;
@@ -83,32 +121,54 @@ export class Commands {
       const symbolArg = args[0]?.toUpperCase();
       const tfArg = args[1]?.toLowerCase();
 
+      // Count every /scan request (UTC day), regardless of outcome.
+      try {
+        if (typeof this.stateRepo.bumpScanRequest === "function") {
+          this.stateRepo.bumpScanRequest();
+          await this.stateRepo.flush();
+        }
+      } catch {}
+
+
       let symbolUsed = symbolArg || null;
       const rotationMode = !symbolArg;
 
-      const out = await this.progressUi.run({ chatId, userId }, async () => {
-        if (!symbolArg) {
+      const startedAt = Date.now();
+      let out = null;
+
+      // Rotation mode keeps Progress UI (single edited message).
+      if (rotationMode) {
+        out = await this.progressUi.run({ chatId, userId }, async () => {
           const { symbol, res } = await this.pipeline.scanOneBest(chatId);
           symbolUsed = symbol;
           return res;
+        });
+      } else {
+        // Targeted /scan (pair / pair+tf) skips Progress UI to avoid double messages
+        // and focuses on a single explain/result response.
+        try {
+          let res = null;
+
+          if (symbolArg && !tfArg) {
+            symbolUsed = symbolArg;
+            res = await this.pipeline.scanPair(symbolArg);
+          } else {
+            symbolUsed = symbolArg;
+            res = await this.pipeline.scanPairTf(symbolArg, tfArg);
+
+            // LOCKED 4h special rule:
+            if (tfArg === this.env.SECONDARY_TIMEFRAME && symbolArg !== "ETHUSDT") {
+              if (!res) res = null;
+              else if ((res.score || 0) < this.env.SECONDARY_MIN_SCORE) res = null;
+            }
+          }
+
+          const elapsedMs = Date.now() - startedAt;
+          out = res ? { kind: "OK", result: res, elapsedMs } : { kind: "NO_SIGNAL", elapsedMs };
+        } catch {
+          out = { kind: "TIMEOUT", elapsedMs: Date.now() - startedAt };
         }
-
-        if (symbolArg && !tfArg) {
-          symbolUsed = symbolArg;
-          return this.pipeline.scanPair(symbolArg);
-        }
-
-        symbolUsed = symbolArg;
-        const res = await this.pipeline.scanPairTf(symbolArg, tfArg);
-
-        // LOCKED 4h special rule:
-        if (tfArg === this.env.SECONDARY_TIMEFRAME && symbolArg !== "ETHUSDT") {
-          if (!res) return null;
-          if ((res.score || 0) < this.env.SECONDARY_MIN_SCORE) return null;
-        }
-
-        return res;
-      });
+      }
 
       if (out.kind === "THROTTLED") {
         await this.signalsRepo.logScanThrottled({
@@ -159,6 +219,12 @@ export class Commands {
           query: { symbol: symbolUsed || null, tf: tfArg || null, raw: raw || "" },
           elapsedMs: out.elapsedMs
         });
+
+        // Avoid silent failures for targeted scans (no Progress UI bubble here).
+        await this.sender.sendText(chatId, [
+          "Cloud Trend Alert",
+          "⚠️ Scan timed out. Try again later."
+        ].join("\n"));
         return;
       }
 
@@ -189,6 +255,39 @@ export class Commands {
         return;
       }
 
+
+      // Prevent duplicate active signals (same Pair + Timeframe)
+      try {
+        const existing =
+          (typeof this.positionsRepo.findActiveBySymbolTf === "function"
+            ? this.positionsRepo.findActiveBySymbolTf(res.symbol, res.tf)
+            : null) ||
+          (Array.isArray(this.positionsRepo.listActive?.())
+            ? this.positionsRepo.listActive().find((p) =>
+                p &&
+                p.status !== "CLOSED" &&
+                p.status !== "EXPIRED" &&
+                String(p.symbol || "").toUpperCase() === String(res.symbol || "").toUpperCase() &&
+                String(p.tf || "").toLowerCase() === String(res.tf || "").toLowerCase()
+              )
+            : null);
+
+        if (existing) {
+          await this.signalsRepo.logScanThrottled({
+            chatId,
+            query: { symbol: symbolUsed || null, tf: res.tf || null, raw: raw || "" },
+            meta: { reason: "DUPLICATE_ACTIVE" }
+          });
+
+          await this.sender.sendText(chatId, formatDuplicateNotice({
+            symbol: res.symbol,
+            tf: res.tf,
+            pos: existing
+          }));
+          return;
+        }
+      } catch {}
+
       // chart FIRST (ENTRY only)
       const overlays = buildOverlays(res);
       const png = await renderEntryChart(res, overlays);
@@ -197,9 +296,12 @@ export class Commands {
       const entryMsg = await this.sender.sendText(chatId, entryCard(res));
 
       // counters
-      this.stateRepo.bumpScan(res.tf);
-      await this.stateRepo.flush();
-
+      try {
+        if (typeof this.stateRepo.bumpScanSignalsSent === "function") this.stateRepo.bumpScanSignalsSent(res.tf);
+        else this.stateRepo.bumpScan(res.tf);
+        if (typeof this.stateRepo.markSentPairTf === "function") this.stateRepo.markSentPairTf(res.symbol, res.tf);
+        await this.stateRepo.flush();
+      } catch {}
       // log entry
       await this.signalsRepo.logEntry({
         source: "SCAN",
@@ -215,6 +317,14 @@ export class Commands {
           ? { entryMessageIds: { [String(chatId)]: entryMsg.message_id } }
           : null
       });
+
+      // Entry lifecycle normalization (non-breaking, but prevents false TP/SL before entry is filled)
+      pos.createdAt = pos.createdAt || Date.now();
+      pos.expiresAt = pos.expiresAt || (pos.createdAt + ttlMsForTf(pos.tf));
+      if (!pos.filledAt && !pos.hitTP1 && !pos.hitTP2 && !pos.hitTP3) {
+        pos.status = "PENDING_ENTRY";
+      }
+
       this.positionsRepo.upsert(pos);
       await this.positionsRepo.flush();
     });

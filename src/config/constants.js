@@ -7,9 +7,12 @@ export const SIGNALS_DIR = path.join(DATA_DIR, "signals");
 export const KLINES_DIR = path.join(DATA_DIR, "klines");
 
 export const STATUS = {
+  // Lifecycle
+  PENDING_ENTRY: "PENDING_ENTRY",
   ENTRY: "ENTRY",
   RUNNING: "RUNNING",
-  CLOSED: "CLOSED"
+  CLOSED: "CLOSED",
+  EXPIRED: "EXPIRED"
 };
 
 export function ensureDirs() {

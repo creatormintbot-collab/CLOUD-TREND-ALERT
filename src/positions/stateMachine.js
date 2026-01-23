@@ -2,6 +2,7 @@ import { STATUS } from "../config/constants.js";
 
 export function applyTP(pos, price) {
   if (pos.status === "CLOSED") return { changed: false };
+  if (pos.status === "PENDING_ENTRY" || pos.status === "EXPIRED") return { changed: false };
   const p = Number(price);
 
   const tp1 = Number(pos.levels.tp1);
@@ -41,6 +42,7 @@ export function applyTP(pos, price) {
 export function applySL(pos, price) {
   // LOCKED: first line skip CLOSED
   if (pos.status === "CLOSED") return { changed: false };
+  if (pos.status === "PENDING_ENTRY" || pos.status === "EXPIRED") return { changed: false };
 
   const p = Number(price);
   const sl = Number(pos.slCurrent);

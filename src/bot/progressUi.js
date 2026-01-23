@@ -27,14 +27,14 @@ export class ProgressUi {
     if (last && (now - last) < this.THROTTLE_MS) {
       const waitSec = Math.ceil((this.THROTTLE_MS - (now - last)) / 1000);
       await this.sender.sendText(chatId, `⏳ Too many requests. Please wait ${waitSec}s and try again…`);
-      return { kind: "THROTTLED", elapsedMs: 0, result: null };
+      return { kind: "THROTTLED", elapsedMs: 0, result: null, messageId: null };
     }
     this.lastAt.set(key, now);
 
     // lock
     if (this.locked(key)) {
       await this.sender.sendText(chatId, "⏳ Scan in progress, please wait…");
-      return { kind: "LOCKED", elapsedMs: 0, result: null };
+      return { kind: "LOCKED", elapsedMs: 0, result: null, messageId: null };
     }
 
     this.lock(key);
@@ -56,28 +56,28 @@ export class ProgressUi {
 
       if (elapsed() > 20_000) {
         await this.sender.editText(chatId, msg.message_id, "⚠️ Scan timeout. Please try again.");
-        return { kind: "TIMEOUT", elapsedMs: elapsed(), result: null };
+        return { kind: "TIMEOUT", elapsedMs: elapsed(), result: null, messageId: msg?.message_id || null };
       }
 
       const res = await fn();
 
       if (elapsed() > 20_000) {
         await this.sender.editText(chatId, msg.message_id, "⚠️ Scan timeout. Please try again.");
-        return { kind: "TIMEOUT", elapsedMs: elapsed(), result: null };
+        return { kind: "TIMEOUT", elapsedMs: elapsed(), result: null, messageId: msg?.message_id || null };
       }
 
       if (!res) {
-        await this.sender.editText(chatId, msg.message_id, "⚠️ No valid setup found. Try again later.");
-        return { kind: "NO_SIGNAL", elapsedMs: elapsed(), result: null };
+        await this.sender.editText(chatId, msg.message_id, "⚠️ No valid setup found. Details will be shown below.");
+        return { kind: "NO_SIGNAL", elapsedMs: elapsed(), result: null, messageId: msg?.message_id || null };
       }
 
       await this.sender.editText(chatId, msg.message_id, "✅ AI Futures Signal Generated! 100%");
-      return { kind: "OK", elapsedMs: elapsed(), result: res };
+      return { kind: "OK", elapsedMs: elapsed(), result: res, messageId: msg?.message_id || null };
     } catch {
       if (msg?.message_id) {
         await this.sender.editText(chatId, msg.message_id, "⚠️ Scan timeout. Please try again.");
       }
-      return { kind: "TIMEOUT", elapsedMs: elapsed(), result: null };
+      return { kind: "TIMEOUT", elapsedMs: elapsed(), result: null, messageId: msg?.message_id || null };
     } finally {
       this.unlock(key);
     }

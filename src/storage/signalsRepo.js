@@ -1,6 +1,19 @@
 import path from "node:path";
 import { SIGNALS_DIR } from "../config/constants.js";
 import { utcDateKey } from "../utils/time.js";
+
+function prevUtcDayKey(dayKey) {
+  try {
+    const d = new Date(`${dayKey}T00:00:00.000Z`);
+    d.setUTCDate(d.getUTCDate() - 1);
+    return utcDateKey(d);
+  } catch {
+    // fallback: yesterday from now
+    const d = new Date();
+    d.setUTCDate(d.getUTCDate() - 1);
+    return utcDateKey(d);
+  }
+}
 import { readJson, writeJsonAtomic } from "./jsonStore.js";
 
 export class SignalsRepo {
@@ -169,6 +182,79 @@ export class SignalsRepo {
     });
 
     return this._queue;
+  }
+
+  // ---- helpers (non-breaking) ----
+  async readDay(dayKey) {
+    const file = path.join(SIGNALS_DIR, `signals-${dayKey}.json`);
+    const data = await readJson(file, { dateUTC: dayKey, events: [] });
+    if (!data?.events) return { dateUTC: dayKey, events: [] };
+    return data;
+  }
+
+  async hasRecentEntry({ symbol, tf, withinMs = 0, nowMs = null }) {
+    const s = String(symbol || "").toUpperCase();
+    const t = String(tf || "").toLowerCase();
+    const ms = Number(withinMs || 0);
+    const now = Number(nowMs ?? Date.now());
+    if (!s || !t || !Number.isFinite(ms) || ms <= 0) return false;
+
+    const todayKey = utcDateKey(new Date(now));
+    const prevKey = prevUtcDayKey(todayKey);
+
+    const [today, prev] = await Promise.all([this.readDay(todayKey), this.readDay(prevKey)]);
+    const events = [...(prev?.events || []), ...(today?.events || [])];
+
+    const cutoff = now - ms;
+
+    for (const ev of events) {
+      if (!ev || ev.type !== "ENTRY") continue;
+      if (String(ev.symbol || "").toUpperCase() !== s) continue;
+      if (String(ev.tf || "").toLowerCase() !== t) continue;
+
+      const ts = Date.parse(ev.ts || "");
+      if (Number.isFinite(ts) && ts >= cutoff) return true;
+    }
+    return false;
+  }
+
+  async getDayStats(dayKey) {
+    const data = await this.readDay(dayKey);
+    const events = Array.isArray(data?.events) ? data.events : [];
+
+    const stats = {
+      dateKey: dayKey,
+      autoSignalsSent: 0,
+      scanRequests: 0,
+      scanSignalsSent: 0,
+      totalSignalsSent: 0,
+      tfBreakdownSent: { "15m": 0, "30m": 0, "1h": 0, "4h": 0 },
+    };
+
+    for (const ev of events) {
+      if (!ev) continue;
+
+      if (ev.type === "ENTRY") {
+        const src = String(ev.source || "").toUpperCase();
+        if (src === "AUTO") stats.autoSignalsSent++;
+        if (src === "SCAN") {
+          stats.scanSignalsSent++;
+          stats.scanRequests++; // a successful /scan is still a request
+        }
+
+        const tf = String(ev.tf || "").toLowerCase();
+        if (stats.tfBreakdownSent[tf] !== undefined) stats.tfBreakdownSent[tf]++;
+        stats.totalSignalsSent++;
+        continue;
+      }
+
+      // Count /scan attempts that didn't produce a signal.
+      if (ev.type === "SCAN_NO_SIGNAL" || ev.type === "SCAN_TIMEOUT" || ev.type === "SCAN_THROTTLED") {
+        stats.scanRequests++;
+      }
+    }
+
+    return stats;
   }
 
   async flush() {

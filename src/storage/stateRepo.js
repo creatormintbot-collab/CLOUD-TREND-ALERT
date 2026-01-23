@@ -7,8 +7,11 @@ const FILE = path.join(DATA_DIR, "state.json");
 
 function dayInit() {
   return {
+    // Activity (UTC day)
     autoTotal: 0,
-    scanTotal: 0,
+    scanTotal: 0,           // legacy: scan signals sent (kept for backward-compat)
+    scanRequests: 0,        // best-effort: /scan requests received
+    scanSignalsSent: 0,     // /scan signals actually sent
     tfBreakdown: { "15m": 0, "30m": 0, "1h": 0, "4h": 0 },
     topScore: 0,
     scoreSum: 0,
@@ -23,7 +26,7 @@ export class StateRepo {
   constructor() {
     this.state = {
       daily: {},
-      sent: {}, // symbol -> ts
+      sent: {}, // symbol|tf -> ts (legacy keys may exist)
       lastAutoCandle: {}, // tf -> closeTime
       lastRecapSentForDay: "",
       lastRankCache: [] // for /top
@@ -41,13 +44,54 @@ export class StateRepo {
 
   _day(key = utcDateKey()) {
     if (!this.state.daily[key]) this.state.daily[key] = dayInit();
-    return this.state.daily[key];
+    const day = this.state.daily[key];
+
+    // Backward-compat normalization (older day objects may miss newer fields)
+    if (day.autoTotal == null) day.autoTotal = 0;
+    if (day.scanTotal == null) day.scanTotal = 0;
+    if (day.scanRequests == null) day.scanRequests = 0;
+    if (day.scanSignalsSent == null) day.scanSignalsSent = 0;
+
+    if (!day.tfBreakdown) day.tfBreakdown = { "15m": 0, "30m": 0, "1h": 0, "4h": 0 };
+    if (day.tfBreakdown["15m"] == null) day.tfBreakdown["15m"] = 0;
+    if (day.tfBreakdown["30m"] == null) day.tfBreakdown["30m"] = 0;
+    if (day.tfBreakdown["1h"] == null) day.tfBreakdown["1h"] = 0;
+    if (day.tfBreakdown["4h"] == null) day.tfBreakdown["4h"] = 0;
+
+    if (day.topScore == null) day.topScore = 0;
+    if (day.scoreSum == null) day.scoreSum = 0;
+    if (day.scoreCount == null) day.scoreCount = 0;
+    if (day.win == null) day.win = 0;
+    if (day.lose == null) day.lose = 0;
+
+    if (!day.macro) day.macro = { BULLISH: 0, BEARISH: 0, NEUTRAL: 0 };
+    if (day.macro.BULLISH == null) day.macro.BULLISH = 0;
+    if (day.macro.BEARISH == null) day.macro.BEARISH = 0;
+    if (day.macro.NEUTRAL == null) day.macro.NEUTRAL = 0;
+
+    return day;
   }
 
+  // Legacy method: many call sites historically used bumpScan(tf) as "scan signal sent"
   bumpScan(tf) {
     const day = this._day();
     day.scanTotal += 1;
+    day.scanSignalsSent += 1;
     if (day.tfBreakdown[tf] !== undefined) day.tfBreakdown[tf] += 1;
+  }
+
+  // Preferred explicit method: scan signal actually sent
+  bumpScanSignalsSent(tf) {
+    const day = this._day();
+    day.scanTotal += 1;
+    day.scanSignalsSent += 1;
+    if (day.tfBreakdown[tf] !== undefined) day.tfBreakdown[tf] += 1;
+  }
+
+  // Preferred explicit method: /scan request received (even if no signal)
+  bumpScanRequest() {
+    const day = this._day();
+    day.scanRequests += 1;
   }
 
   bumpAuto(tf, score, btcState) {
@@ -72,15 +116,36 @@ export class StateRepo {
     return this._day().autoTotal;
   }
 
-  canSendSymbol(symbol, cooldownMinutes) {
-    const k = String(symbol).toUpperCase();
-    const last = Number(this.state.sent[k] || 0);
-    if (!last) return true;
-    return Date.now() - last >= Number(cooldownMinutes) * 60_000;
+  _normSentKey(symbolOrKey) {
+    const raw = String(symbolOrKey || "").trim();
+    if (!raw) return "";
+    if (!raw.includes("|")) return raw.toUpperCase();
+    const [sym, tf] = raw.split("|");
+    return `${String(sym || "").toUpperCase()}|${String(tf || "").toLowerCase()}`;
   }
 
-  markSent(symbol) {
-    const k = String(symbol).toUpperCase();
+  canSendPairTf(symbol, tf, cooldownMinutes) {
+    return this.canSendSymbol(`${symbol}|${tf}`, cooldownMinutes);
+  }
+
+  markSentPairTf(symbol, tf) {
+    return this.markSent(`${symbol}|${tf}`);
+  }
+
+  canSendSymbol(symbolOrKey, cooldownMinutes) {
+    const k = this._normSentKey(symbolOrKey);
+    const legacy = String(symbolOrKey || "").toUpperCase();
+    const last = Number(this.state.sent[k] || this.state.sent[legacy] || 0);
+    if (!last) return true;
+
+    const cd = Number(cooldownMinutes);
+    if (!Number.isFinite(cd) || cd <= 0) return true;
+
+    return Date.now() - last >= cd * 60_000;
+  }
+
+  markSent(symbolOrKey) {
+    const k = this._normSentKey(symbolOrKey);
     this.state.sent[k] = Date.now();
   }
 
