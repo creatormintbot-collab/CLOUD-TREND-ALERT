@@ -48,9 +48,23 @@ export class Sender {
     if (!this._isAllowed(chatId)) return null;
 
     // Avoid node-telegram-bot-api Buffer filename/content-type deprecation warnings.
+    // Also handle Uint8Array / ArrayBuffer outputs (some chart renderers return these).
     if (Buffer.isBuffer(buffer)) {
       return this.bot.sendPhoto(chatId, buffer, options, { filename: "chart.png", contentType: "image/png" });
     }
+
+    // Uint8Array (typed array)
+    if (buffer instanceof Uint8Array) {
+      const b = Buffer.from(buffer);
+      return this.bot.sendPhoto(chatId, b, options, { filename: "chart.png", contentType: "image/png" });
+    }
+
+    // ArrayBuffer
+    if (buffer instanceof ArrayBuffer) {
+      const b = Buffer.from(new Uint8Array(buffer));
+      return this.bot.sendPhoto(chatId, b, options, { filename: "chart.png", contentType: "image/png" });
+    }
+
     return this.bot.sendPhoto(chatId, buffer, options);
   }
 }
