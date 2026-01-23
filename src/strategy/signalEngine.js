@@ -191,6 +191,9 @@ export function evaluateSignal({ symbol, tf, klines, thresholds, env = {}, isAut
   if (!core.pullbackOk) return { ok: false };
   if (core.fin.total < 70) return { ok: false };
 
+  // AUTO publish gate: MACD must confirm direction
+  if (isAuto && !core.macd.gateOk) return { ok: false };
+
   const entryMid = core.close;
   const lv = levelsFromATR({
     direction: core.direction,
@@ -276,7 +279,8 @@ export function explainSignal({ symbol, tf, klines, thresholds, env = {}, isAuto
     !!core.direction &&
     !!core.pullbackOk &&
     Number(core.fin.total || 0) >= 70 &&
-    ctaOk;
+    ctaOk &&
+    (!isAuto || core.macd.gateOk);
 
   // secondary blocked rule
   const secondaryBlocked =

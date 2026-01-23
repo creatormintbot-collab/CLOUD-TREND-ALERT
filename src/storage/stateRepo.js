@@ -135,7 +135,19 @@ export class StateRepo {
   canSendSymbol(symbolOrKey, cooldownMinutes) {
     const k = this._normSentKey(symbolOrKey);
     const legacy = String(symbolOrKey || "").toUpperCase();
-    const last = Number(this.state.sent[k] || this.state.sent[legacy] || 0);
+
+    // Backward-compat: older state may have per-symbol keys (without |tf).
+    // If call sites mix "SYMBOL" and "SYMBOL|tf", use a safe fallback to prevent duplicates.
+    const baseK = k.includes("|") ? k.split("|")[0] : "";
+    const baseLegacy = legacy.includes("|") ? legacy.split("|")[0] : "";
+
+    const last = Number(
+      this.state.sent[k] ||
+      this.state.sent[legacy] ||
+      (baseK ? this.state.sent[baseK] : 0) ||
+      (baseLegacy ? this.state.sent[baseLegacy] : 0) ||
+      0
+    );
     if (!last) return true;
 
     const cd = Number(cooldownMinutes);

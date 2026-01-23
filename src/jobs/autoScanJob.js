@@ -7,7 +7,7 @@ export function startAutoScanJob({ run, intervalMs = 15_000, onError = null }) {
       await run();
     } catch (err) {
       try {
-        if (typeof onError === "function") onError(err);
+        if (typeof onError === "function") await onError(err);
         else console.error("[autoScanJob] run() failed:", err);
       } catch {}
     } finally {

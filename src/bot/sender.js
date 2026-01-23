@@ -11,9 +11,44 @@ export class Sender {
     return this.allowed.has(id);
   }
 
+  // Ignore hard "no access" telegram errors so one dead chat doesn't break the whole AUTO run.
+  // This prevents duplicate AUTO signals when the job marks state after sending (partial-send + throw).
+  _isIgnorableTelegramError(err) {
+    const status = err?.response?.statusCode ?? err?.response?.status;
+    const code = err?.response?.body?.error_code;
+    const desc = String(err?.response?.body?.description || err?.message || "").toLowerCase();
+
+    // Kicked / forbidden / blocked / chat missing
+    if (status === 403 || code === 403) return true;
+    if (status === 400 || code === 400) {
+      if (desc.includes("chat not found")) return true;
+      if (desc.includes("bot was kicked")) return true;
+      if (desc.includes("bot was blocked")) return true;
+    }
+
+    // Fallback string matching (node-telegram-bot-api error messages)
+    if (desc.includes("forbidden")) return true;
+    if (desc.includes("bot was kicked")) return true;
+    if (desc.includes("bot was blocked")) return true;
+    if (desc.includes("chat not found")) return true;
+
+    return false;
+  }
+
+  async _safeTelegramCall(fn) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (this._isIgnorableTelegramError(err)) return null;
+      throw err;
+    }
+  }
+
   async sendText(chatId, text) {
     if (!this._isAllowed(chatId)) return null;
-    return this.bot.sendMessage(chatId, text, { disable_web_page_preview: true });
+    return this._safeTelegramCall(() =>
+      this.bot.sendMessage(chatId, text, { disable_web_page_preview: true })
+    );
   }
 
   // Reply helper used by monitor/lifecycle flows.
@@ -28,21 +63,32 @@ export class Sender {
 
     const numId = Number(rid);
     if (!Number.isFinite(numId)) {
-      return this.bot.sendMessage(chatId, text, { disable_web_page_preview: true, ...options });
+      return this._safeTelegramCall(() =>
+        this.bot.sendMessage(chatId, text, { disable_web_page_preview: true, ...options })
+      );
     }
 
-    return this.bot.sendMessage(chatId, text, {
-      disable_web_page_preview: true,
-      reply_to_message_id: numId,
-      allow_sending_without_reply: true,
-      ...options,
-    });
+    return this._safeTelegramCall(() =>
+      this.bot.sendMessage(chatId, text, {
+        disable_web_page_preview: true,
+        reply_to_message_id: numId,
+        allow_sending_without_reply: true,
+        ...options,
+      })
+    );
   }
 
   async editText(chatId, messageId, text) {
     if (!this._isAllowed(chatId)) return null;
-    return this.bot.editMessageText(text, { chat_id: chatId, message_id: messageId, disable_web_page_preview: true });
+    return this._safeTelegramCall(() =>
+      this.bot.editMessageText(text, {
+        chat_id: chatId,
+        message_id: messageId,
+        disable_web_page_preview: true,
+      })
+    );
   }
+
   async sendPhoto(chatId, buffer, options = {}) {
     if (!this._isAllowed(chatId)) return null;
 
@@ -59,16 +105,20 @@ export class Sender {
     }
 
     if (Buffer.isBuffer(photo)) {
-      return this.bot.sendPhoto(chatId, photo, options, fileOptions);
+      return this._safeTelegramCall(() => this.bot.sendPhoto(chatId, photo, options, fileOptions));
     }
     if (photo instanceof Uint8Array) {
-      return this.bot.sendPhoto(chatId, Buffer.from(photo), options, fileOptions);
+      return this._safeTelegramCall(() =>
+        this.bot.sendPhoto(chatId, Buffer.from(photo), options, fileOptions)
+      );
     }
     if (photo instanceof ArrayBuffer) {
-      return this.bot.sendPhoto(chatId, Buffer.from(new Uint8Array(photo)), options, fileOptions);
+      return this._safeTelegramCall(() =>
+        this.bot.sendPhoto(chatId, Buffer.from(new Uint8Array(photo)), options, fileOptions)
+      );
     }
 
     // Fallback (string file_id/path or stream). Keep fileOptions to be explicit.
-    return this.bot.sendPhoto(chatId, photo, options, fileOptions);
+    return this._safeTelegramCall(() => this.bot.sendPhoto(chatId, photo, options, fileOptions));
   }
 }
