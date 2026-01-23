@@ -16,7 +16,7 @@ export class Sender {
     return this.bot.sendMessage(chatId, text, { disable_web_page_preview: true });
   }
 
-  // Used by monitor/lifecycle flows to reply to a specific message when possible.
+  // Reply helper used by monitor/lifecycle flows.
   // Minimal addition: if reply target is missing/invalid, fall back to normal sendMessage.
   async sendTextReply(chatId, replyToMessageId, text, options = {}) {
     if (!this._isAllowed(chatId)) return null;
@@ -47,9 +47,7 @@ export class Sender {
   async sendPhoto(chatId, buffer, options = {}) {
     if (!this._isAllowed(chatId)) return null;
 
-    // Avoid node-telegram-bot-api Buffer deprecation warnings:
-    // - provide filename
-    // - provide explicit contentType for PNG buffers
+    // Avoid node-telegram-bot-api Buffer filename/content-type deprecation warnings.
     if (Buffer.isBuffer(buffer)) {
       return this.bot.sendPhoto(chatId, buffer, options, { filename: "chart.png", contentType: "image/png" });
     }
