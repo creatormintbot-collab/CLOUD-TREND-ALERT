@@ -71,7 +71,19 @@ export async function bootstrap() {
     logger
   });
 
-  const universe = new UniverseService({ rest, volumeMarket: env.VOLUME_MARKET, topN: env.TOP_VOLUME_N, logger });
+  const universe = new UniverseService({
+    rest,
+    volumeMarket: env.VOLUME_MARKET,
+    topN: env.TOP_VOLUME_N,
+
+    // LOCKED wiring: ALL USDT-M perpetual with liquidity floor (+ AUTO volume gate)
+    useTopVolume: env.USE_TOP_VOLUME,
+    liquidityMinQuoteVol: env.LIQUIDITY_MIN_QUOTE_VOL_USDT,
+    autoVolumeTopN: env.AUTO_VOLUME_TOP_N,
+    autoMinQuoteVol: env.AUTO_MIN_QUOTE_VOL_USDT,
+
+    logger
+  });
   await universe.refresh();
 
   const thresholds = {
