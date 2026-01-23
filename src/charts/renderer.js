@@ -262,6 +262,7 @@ function renderWithCanvas(createCanvas, signal, overlays) {
       const padX = 14;
       const w = Math.ceil(ctx.measureText(text).width + padX * 2);
       const h = 30;
+      const x0 = Math.min(Math.max(x, priceRect.x + 6), priceRect.x + priceRect.w - w - 6);
       roundRect(x, y, w, h, 7);
       ctx.fillStyle = bg;
       ctx.fill();
@@ -281,7 +282,8 @@ function renderWithCanvas(createCanvas, signal, overlays) {
       const padX = 14;
       const w = Math.ceil(ctx.measureText(text).width + padX * 2);
       const h = 30;
-      roundRect(x, y - h / 2, w, h, 7);
+      const x0 = Math.min(Math.max(x, priceRect.x + 6), priceRect.x + priceRect.w - w - 6);
+      roundRect(x0, y - h / 2, w, h, 7);
       ctx.fillStyle = COLORS.dark;
       ctx.fill();
       ctx.lineWidth = 2;
@@ -289,7 +291,7 @@ function renderWithCanvas(createCanvas, signal, overlays) {
       ctx.stroke();
       ctx.fillStyle = color;
       ctx.textBaseline = "middle";
-      ctx.fillText(text, x + padX, y + 0.5);
+      ctx.fillText(text, x0 + padX, y + 0.5);
       ctx.restore();
       return { w, h };
     };
@@ -366,19 +368,22 @@ function renderWithCanvas(createCanvas, signal, overlays) {
     border(priceRect);
     border(volRect);
 
-    // candles coords
-// Reserve "future space" on the right so labels/boxes sit AFTER the last candle
-// (match reference screenshot where TP/SL/Entry tags are in the empty right-side area).
-const FUTURE_BARS = 32;
-const step = priceRect.w / (view.length + FUTURE_BARS);
-const bodyW = Math.max(4, Math.floor(step * 0.62));
-const candleEndX = priceRect.x + step * view.length;
+        // candles coords
+    // Reserve a fixed label column on the right so TP/SL/Entry tags sit in the empty area
+    // (match the reference style where labels are not drawn over candles).
+    const LABEL_COL_W = 280;
+    const LABEL_COL_GAP = 10;
+    const candlePlotW = Math.max(120, priceRect.w - LABEL_COL_W - LABEL_COL_GAP);
+    const step = candlePlotW / view.length;
+    const bodyW = Math.max(4, Math.floor(step * 0.62));
+    const candleEndX = priceRect.x + candlePlotW;
+    const labelColX = candleEndX + LABEL_COL_GAP;
 
     // risk/reward shaded zones on right
     const entryForBox = entryMid;
     const tpForBox = tp2 ?? tp1 ?? tp3;
     if (entryForBox !== null && sl !== null && tpForBox !== null) {
-      const xStart = Math.min(priceRect.x + priceRect.w, candleEndX + step * 0.5);
+            const xStart = labelColX;
       const yE = yOf(entryForBox);
       const ySL = yOf(sl);
       const yTP = yOf(tpForBox);
@@ -459,8 +464,7 @@ const candleEndX = priceRect.x + step * view.length;
     if (overlays.ema100) drawMA(overlays.ema100, "rgba(230,40,40,1)", 3);
     if (overlays.sma100) drawMA(overlays.sma100, "rgba(230,40,40,1)", 3);
 
-    // level lines + labels
-    const labelX = Math.min(candleEndX + step * 1.2, priceRect.x + priceRect.w - 240);
+    // level lines + labels    const labelX = labelColX + 12;
     const placed = [];
     const placeY = (y) => {
       let yy = y;
@@ -517,15 +521,18 @@ const candleEndX = priceRect.x + step * view.length;
     for (const c of view) vmax = Math.max(vmax, Number(c.volume || 0));
     vmax = Math.max(1, vmax);
 
+    const stepV = volRect.w / view.length;
+    const bodyWV = Math.max(4, Math.floor(stepV * 0.62));
+
     for (let i = 0; i < view.length; i++) {
       const c = view[i];
       const v = Number(c.volume || 0);
       const up = Number(c.close) >= Number(c.open);
       const col = up ? COLORS.bull : COLORS.bear;
 
-      const xMid = volRect.x + step * (i + 0.5);
+            const xMid = volRect.x + stepV * (i + 0.5);
       const h = Math.round((v / vmax) * (volRect.h - 6));
-      const x = Math.floor(xMid - bodyW / 2);
+            const x = Math.floor(xMid - bodyWV / 2);
       const y = Math.floor(volRect.y + volRect.h - h);
 
       ctx.save();

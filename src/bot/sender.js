@@ -43,28 +43,32 @@ export class Sender {
     if (!this._isAllowed(chatId)) return null;
     return this.bot.editMessageText(text, { chat_id: chatId, message_id: messageId, disable_web_page_preview: true });
   }
-
   async sendPhoto(chatId, buffer, options = {}) {
     if (!this._isAllowed(chatId)) return null;
 
-    // Avoid node-telegram-bot-api Buffer filename/content-type deprecation warnings.
-    // Also handle Uint8Array / ArrayBuffer outputs (some chart renderers return these).
-    if (Buffer.isBuffer(buffer)) {
-      return this.bot.sendPhoto(chatId, buffer, options, { filename: "chart.png", contentType: "image/png" });
+    // Always pass filename + contentType to avoid node-telegram-bot-api deprecation warnings.
+    // Also normalize common binary types (Uint8Array / ArrayBuffer / wrapper objects).
+    const fileOptions = { filename: "chart.png", contentType: "image/png" };
+
+    let photo = buffer;
+    if (photo && typeof photo === "object" && !Buffer.isBuffer(photo)) {
+      // Some renderers may wrap the buffer (e.g., { data }, { buffer }, { source }).
+      if (photo.source) photo = photo.source;
+      else if (photo.buffer) photo = photo.buffer;
+      else if (photo.data) photo = photo.data;
     }
 
-    // Uint8Array (typed array)
-    if (buffer instanceof Uint8Array) {
-      const b = Buffer.from(buffer);
-      return this.bot.sendPhoto(chatId, b, options, { filename: "chart.png", contentType: "image/png" });
+    if (Buffer.isBuffer(photo)) {
+      return this.bot.sendPhoto(chatId, photo, options, fileOptions);
+    }
+    if (photo instanceof Uint8Array) {
+      return this.bot.sendPhoto(chatId, Buffer.from(photo), options, fileOptions);
+    }
+    if (photo instanceof ArrayBuffer) {
+      return this.bot.sendPhoto(chatId, Buffer.from(new Uint8Array(photo)), options, fileOptions);
     }
 
-    // ArrayBuffer
-    if (buffer instanceof ArrayBuffer) {
-      const b = Buffer.from(new Uint8Array(buffer));
-      return this.bot.sendPhoto(chatId, b, options, { filename: "chart.png", contentType: "image/png" });
-    }
-
-    return this.bot.sendPhoto(chatId, buffer, options);
+    // Fallback (string file_id/path or stream). Keep fileOptions to be explicit.
+    return this.bot.sendPhoto(chatId, photo, options, fileOptions);
   }
 }
