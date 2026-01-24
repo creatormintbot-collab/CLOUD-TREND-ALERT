@@ -41,6 +41,15 @@ export function validateEnvOrThrow() {
   if (env.USE_TOP_VOLUME && (!Number.isFinite(env.TOP_VOLUME_N) || Number(env.TOP_VOLUME_N) <= 0)) {
     throw new Error("TOP_VOLUME_N must be > 0 when USE_TOP_VOLUME=true");
   }
+
+  // /top command requires at least 10 symbols available in universe cache
+  if (!Number.isFinite(env.TOP_VOLUME_N) || Number(env.TOP_VOLUME_N) < 10) {
+    throw new Error("TOP_VOLUME_N must be >= 10");
+  }
+  if (!Number.isFinite(env.UNIVERSE_REFRESH_HOURS) || Number(env.UNIVERSE_REFRESH_HOURS) <= 0) {
+    throw new Error("UNIVERSE_REFRESH_HOURS must be > 0");
+  }
+
   if (!Number.isFinite(env.LIQUIDITY_MIN_QUOTE_VOL_USDT) || Number(env.LIQUIDITY_MIN_QUOTE_VOL_USDT) < 0) {
     throw new Error("LIQUIDITY_MIN_QUOTE_VOL_USDT must be >= 0");
   }

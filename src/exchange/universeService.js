@@ -37,6 +37,9 @@ export class UniverseService {
     this._autoSymbols = [];
     this._topSymbols = [];
 
+    // New: keep full rows for /top volume UI (cached)
+    this._topRows = [];
+
     this._perpSet = new Set();
   }
 
@@ -47,6 +50,12 @@ export class UniverseService {
   symbolsForScan() { return (this._scanSymbols && this._scanSymbols.length ? this._scanSymbols : this._symbols).slice(); }
   symbolsForAuto() { return (this._autoSymbols && this._autoSymbols.length ? this._autoSymbols : this._symbols).slice(); }
   topSymbols() { return (this._topSymbols && this._topSymbols.length ? this._topSymbols : this._symbols).slice(); }
+
+  // New: top volume rows (symbol + quoteVolume) for /top card.
+  topVolumeRows(n = 10) {
+    const lim = Math.max(0, Math.floor(Number(n || 10)));
+    return (this._topRows && this._topRows.length ? this._topRows : []).slice(0, lim);
+  }
 
   async refresh() {
     // build perpetual USDT list from exchangeInfo
@@ -77,7 +86,8 @@ export class UniverseService {
       .sort((a, b) => b.quoteVolume - a.quoteVolume);
 
     // Top-N universe (legacy behaviour)
-    this._topSymbols = rows.slice(0, this.topN).map((r) => r.symbol);
+    this._topRows = rows.slice(0, this.topN);
+    this._topSymbols = this._topRows.map((r) => r.symbol);
 
     // Liquidity floor universe (ALL perps filtered by quote volume threshold)
     const minQ = Number(this.liquidityMinQuoteVol || 0);

@@ -1,7 +1,262 @@
 import { entryCard } from "./cards/entryCard.js";
+import { recapCard } from "./cards/recapCard.js";
 import { buildOverlays } from "../charts/layout.js";
 import { renderEntryChart } from "../charts/renderer.js";
 import { createPositionFromSignal } from "../positions/positionModel.js";
+function utcDateKeyNow() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function utcTimeNow() {
+  return new Date().toISOString().slice(11, 16);
+}
+
+function startOfUtcDayMs(dateKey) {
+  const dk = String(dateKey || utcDateKeyNow());
+  return Date.parse(dk + "T00:00:00.000Z");
+}
+
+function sameUtcDay(ts, dateKey) {
+  const n = Number(ts);
+  if (!Number.isFinite(n) || n <= 0) return false;
+  return new Date(n).toISOString().slice(0, 10) === String(dateKey);
+}
+
+function compactNum(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return "0";
+  const abs = Math.abs(x);
+  if (abs >= 1e12) return (x / 1e12).toFixed(2) + "T";
+  if (abs >= 1e9) return (x / 1e9).toFixed(2) + "B";
+  if (abs >= 1e6) return (x / 1e6).toFixed(2) + "M";
+  if (abs >= 1e3) return (x / 1e3).toFixed(2) + "K";
+  return String(Math.round(x));
+}
+
+function pickDayStats(state, dateKey) {
+  if (!state || typeof state !== "object") return null;
+  const dk = String(dateKey || utcDateKeyNow());
+
+  const candidates = [
+    state.dailyStats?.[dk],
+    state.daily?.[dk],
+    state.stats?.[dk],
+    state.recap?.[dk],
+    state.days?.[dk],
+    state.byDay?.[dk]
+  ];
+
+  for (const c of candidates) {
+    if (c && typeof c === "object") return c;
+  }
+  return null;
+}
+
+async function readStateSnapshot(stateRepo) {
+  try {
+    if (typeof stateRepo.getSnapshot === "function") return await stateRepo.getSnapshot();
+    if (typeof stateRepo.getState === "function") return await stateRepo.getState();
+    if (typeof stateRepo.get === "function") return await stateRepo.get();
+    if (typeof stateRepo.read === "function") return await stateRepo.read();
+    if (typeof stateRepo.load === "function") return await stateRepo.load();
+    if (stateRepo.state && typeof stateRepo.state === "object") return stateRepo.state;
+  } catch {}
+  return null;
+}
+
+async function listAllPositions(positionsRepo) {
+  try {
+    if (typeof positionsRepo.listAll === "function") return await positionsRepo.listAll();
+    if (typeof positionsRepo.list === "function") return await positionsRepo.list();
+    if (typeof positionsRepo.getAll === "function") return await positionsRepo.getAll();
+    if (typeof positionsRepo.items === "function") return await positionsRepo.items();
+    if (Array.isArray(positionsRepo.positions)) return positionsRepo.positions;
+    if (Array.isArray(positionsRepo.data)) return positionsRepo.data;
+    if (Array.isArray(positionsRepo._data)) return positionsRepo._data;
+  } catch {}
+  return [];
+}
+
+
+async function readSignalsDayStats(signalsRepo, dayKey) {
+  try {
+    if (!signalsRepo) return null;
+    const dk = String(dayKey || utcDateKeyNow());
+    if (typeof signalsRepo.readDay !== "function") return null;
+
+    const data = await signalsRepo.readDay(dk);
+    const events = Array.isArray(data?.events) ? data.events : [];
+
+    const stats = {
+      autoSignalsSent: 0,
+      scanRequestsSuccess: 0,
+      scanSignalsSent: 0,
+      totalSignalsCreated: 0,
+      tfBreakdownCreated: { "15m": 0, "30m": 0, "1h": 0, "4h": 0 },
+    };
+
+    for (const ev of events) {
+      if (!ev) continue;
+
+      const type = String(ev.type || "").toUpperCase();
+
+      if (type === "ENTRY") {
+        const src = String(ev.source || "").toUpperCase();
+        if (src === "AUTO") stats.autoSignalsSent++;
+        if (src === "SCAN") {
+          stats.scanSignalsSent++;
+          // Each SCAN-produced ENTRY implies a successful /scan request.
+          stats.scanRequestsSuccess++;
+        }
+
+        const tf = String(ev.tf || "").toLowerCase();
+        if (stats.tfBreakdownCreated[tf] !== undefined) stats.tfBreakdownCreated[tf]++;
+
+        stats.totalSignalsCreated++;
+        continue;
+      }
+
+      // A /scan that returns "no signal" is still a successful request.
+      if (type === "SCAN_NO_SIGNAL") {
+        stats.scanRequestsSuccess++;
+        continue;
+      }
+
+      // Duplicate-prevented / gated scan: still a successful request (not a failure).
+      if (type === "SCAN_THROTTLED") {
+        stats.scanRequestsSuccess++;
+        continue;
+      }
+
+      // TIMEOUT / exception bucket => do NOT count as success.
+    }
+
+    return stats;
+  } catch {
+    return null;
+  }
+}
+
+function isActivePos(p) {
+  const s = String(p?.status || "").toUpperCase();
+  if (!s) return true;
+  if (s === "CLOSED" || s.startsWith("CLOSED")) return false;
+  if (s === "EXPIRED") return false;
+  return true;
+}
+
+function isClosedPos(p) {
+  const s = String(p?.status || "").toUpperCase();
+  return s === "CLOSED" || s.startsWith("CLOSED") || Number(p?.closedAt || 0) > 0;
+}
+
+function entryHitTs(p) {
+  const a = Number(p?.entryHitAt || 0);
+  const b = Number(p?.filledAt || 0);
+  const c = Number(p?.entryFilledAt || 0);
+  const d = Number(p?.entryAt || 0);
+  return a || b || c || d || 0;
+}
+
+function slHit(p) {
+  return Boolean(
+    p?.hitSL ||
+    p?.slHit ||
+    p?.slHitAt ||
+    String(p?.outcome || "").toUpperCase() === "SL" ||
+    String(p?.closedReason || "").toUpperCase().includes("SL")
+  );
+}
+
+function tpHitMax(p) {
+  const t = Number(p?.tpHitMax);
+  if (Number.isFinite(t)) return t;
+  if (p?.hitTP3 || p?.tp3HitAt) return 3;
+  if (p?.hitTP2 || p?.tp2HitAt) return 2;
+  if (p?.hitTP1 || p?.tp1HitAt) return 1;
+  return 0;
+}
+
+function formatTopCard({ dateKey, rows = [], isVolume = true }) {
+  const header = [
+    "CLOUD TREND ALERT",
+    "━━━━━━━━━━━━━━━━━━",
+    "🏅 TOP VOLUME (CACHED)",
+    `Date: ${dateKey} (UTC)`,
+    ""
+  ];
+
+  const lines = rows.slice(0, 10).map((r, i) => {
+    const rawVol =
+      r?.quoteVolume ??
+      r?.quoteVolumeUSDT ??
+      r?.volumeUSDT ??
+      r?.volumeUsd ??
+      r?.usdtVolume ??
+      r?.qv ??
+      r?.volume;
+
+    const volNum = Number(rawVol);
+    const volText = Number.isFinite(volNum) ? compactNum(volNum) : "N/A";
+    return `${i + 1}) ${r?.symbol || "N/A"} — ${volText}`;
+  });
+
+  return [...header, ...lines, "", "⚠ Not Financial Advice"].join("\n");
+}
+
+function formatStatusCard({
+  dateKey,
+  timeKey,
+  autoSent = 0,
+  autoCap = 0,
+  scanOk = 0,
+  scanSignalsSent = 0,
+  totalCreated = 0,
+  runningTotal = 0,
+  entryHitRunning = 0,
+  pendingEntry = 0,
+  carriedRunning = 0,
+  closedToday = 0,
+  tp1Today = 0,
+  tp2Today = 0,
+  tp3Today = 0,
+  directSlToday = 0,
+  givebackToday = 0
+}) {
+  const winToday = tp1Today + tp2Today + tp3Today;
+  const winrate = closedToday > 0 ? ((winToday / closedToday) * 100).toFixed(1) : "0.0";
+  const directSlRate = closedToday > 0 ? ((directSlToday / closedToday) * 100).toFixed(1) : "0.0";
+
+  return [
+    "CLOUD TREND ALERT",
+    "━━━━━━━━━━━━━━━━━━",
+    "🧭 STATUS (UTC)",
+    `Date: ${dateKey} (UTC) | Now: ${timeKey} (UTC)`,
+    "",
+    "🤖 Activity Today (Created Today)",
+    `• AUTO Signals Sent: ${autoSent}${autoCap ? ` / ${autoCap}` : ""}`,
+    `• /scan Requests (success): ${scanOk}`,
+    `• /scan Signals Sent: ${scanSignalsSent}`,
+    `• Total Signals Created: ${totalCreated}`,
+    "",
+    "📌 Live Positions (Now)",
+    `• Running Positions: ${runningTotal}`,
+    `• Entry Hit & Running: ${entryHitRunning}`,
+    `• Pending Entry: ${pendingEntry}`,
+    `• Carried From Previous Days: ${carriedRunning}`,
+    "",
+    "🎯 Results (Closed Today)",
+    `• Closed Trades: ${closedToday}`,
+    `• TP3: ${tp3Today} | TP2: ${tp2Today} | TP1: ${tp1Today} | SL (direct): ${directSlToday}`,
+    `• Giveback (SL after TP1/TP2): ${givebackToday}`,
+    "",
+    "📈 Rates (Closed Today)",
+    `• Winrate (≥TP1): ${winrate}%`,
+    `• Direct SL Rate: ${directSlRate}%`,
+    "",
+    "⚠ Not Financial Advice"
+  ].join("\n");
+}
 
 function formatExplain({ symbol, diags, tfExplicit = null, rotationNote = false }) {
   const tfs = tfExplicit ? [tfExplicit] : (diags || []).map((d) => d.tf);
@@ -103,17 +358,253 @@ export class Commands {
           "• /scan BTCUSDT 1h",
           "• /scan BTCUSDT 4h",
           "• /top",
+          "• /status",
+          "• /info",
           "• /help"
         ].join("\n")
       );
     });
 
     this.bot.onText(/^\/top\b/i, async (msg) => {
-      const ranked = await this.pipeline.topRanked();
-      const lines = ranked.slice(0, 10).map((r, i) => `${i + 1}) ${r.symbol} ${r.tf} — ${Math.round(r.score)}`);
-      await this.sender.sendText(msg.chat.id, ["Top Ranked (cached)", ...lines].join("\n"));
+      const dateKey = utcDateKeyNow();
+
+      let rows = [];
+      try {
+        if (typeof this.pipeline.topVolumeCached === "function") rows = await this.pipeline.topVolumeCached();
+        else if (typeof this.pipeline.topVolume === "function") rows = await this.pipeline.topVolume();
+        else if (typeof this.pipeline.topRanked === "function") rows = await this.pipeline.topRanked();
+      } catch {}
+
+      const list = Array.isArray(rows) ? rows : [];
+      await this.sender.sendText(msg.chat.id, formatTopCard({ dateKey, rows: list, isVolume: true }));
     });
 
+
+    this.bot.onText(/^\/status\b/i, async (msg) => {
+      const dateKey = utcDateKeyNow();
+      const timeKey = utcTimeNow();
+
+      const state = await readStateSnapshot(this.stateRepo);
+      const day = pickDayStats(state, dateKey) || {};
+
+      // Prefer signalsRepo (UTC) for activity numbers to avoid state drift.
+      const sigStats = await readSignalsDayStats(this.signalsRepo, dateKey);
+
+      const autoSent = sigStats
+        ? Number(sigStats.autoSignalsSent || 0)
+        : (Number(day.autoSignalsSent ?? day.autoSent ?? day.autoTotal ?? 0) || 0);
+
+      const scanOk = sigStats
+        ? Number(sigStats.scanRequestsSuccess || 0)
+        : (Number(day.scanRequestsSuccess ?? day.scanRequestsOk ?? day.scanOk ?? 0) || 0);
+
+      const scanSignalsSent = sigStats
+        ? Number(sigStats.scanSignalsSent || 0)
+        : (Number(day.scanSignalsSent ?? day.scanSent ?? 0) || 0);
+
+      const totalCreated = sigStats
+        ? Number(sigStats.totalSignalsCreated || (autoSent + scanSignalsSent))
+        : (Number(day.totalSignalsCreated ?? day.totalSignalsSent ?? (autoSent + scanSignalsSent)) || 0);
+
+      const autoCap = Number(this.env?.MAX_SIGNALS_PER_DAY ?? 0) || 0;
+
+      const all = await listAllPositions(this.positionsRepo);
+      const active = Array.isArray(this.positionsRepo.listActive?.()) ? this.positionsRepo.listActive() : all.filter(isActivePos);
+
+      const startMs = startOfUtcDayMs(dateKey);
+      const activeList = Array.isArray(active) ? active : [];
+
+      const runningTotal = activeList.filter(isActivePos).length;
+      const entryHitRunning = activeList.filter((p) => isActivePos(p) && entryHitTs(p) > 0).length;
+      const pendingEntry = activeList.filter((p) => isActivePos(p) && entryHitTs(p) === 0).length;
+      const carriedRunning = activeList.filter((p) => isActivePos(p) && Number(p?.createdAt || 0) > 0 && Number(p.createdAt) < startMs).length;
+
+      const closedTodayList = (Array.isArray(all) ? all : [])
+        .filter(isClosedPos)
+        .filter((p) => sameUtcDay(Number(p?.closedAt || 0), dateKey));
+
+      let tp1Today = 0;
+      let tp2Today = 0;
+      let tp3Today = 0;
+      let directSlToday = 0;
+      let givebackToday = 0;
+
+      for (const p of closedTodayList) {
+        const t = tpHitMax(p);
+        const sl = slHit(p);
+        if (t >= 3) tp3Today++;
+        else if (t === 2) tp2Today++;
+        else if (t === 1) tp1Today++;
+        else if (sl) directSlToday++;
+        if (sl && t >= 1) givebackToday++;
+      }
+
+      const closedToday = closedTodayList.length;
+
+      await this.sender.sendText(
+        msg.chat.id,
+        formatStatusCard({
+          dateKey,
+          timeKey,
+          autoSent,
+          autoCap,
+          scanOk,
+          scanSignalsSent,
+          totalCreated,
+          runningTotal,
+          entryHitRunning,
+          pendingEntry,
+          carriedRunning,
+          closedToday,
+          tp1Today,
+          tp2Today,
+          tp3Today,
+          directSlToday,
+          givebackToday
+        })
+      );
+    });
+
+    this.bot.onText(/^\/info\b/i, async (msg) => {
+      const dateKey = utcDateKeyNow();
+
+      const state = await readStateSnapshot(this.stateRepo);
+      const day = pickDayStats(state, dateKey) || {};
+
+      // Prefer signalsRepo (UTC) for activity numbers to avoid state drift.
+      const sigStats = await readSignalsDayStats(this.signalsRepo, dateKey);
+
+      const autoSent = sigStats
+        ? Number(sigStats.autoSignalsSent || 0)
+        : (Number(day.autoSignalsSent ?? day.autoSent ?? day.autoTotal ?? 0) || 0);
+
+      const scanReqSuccess = sigStats
+        ? Number(sigStats.scanRequestsSuccess || 0)
+        : (Number(day.scanRequestsSuccess ?? day.scanRequestsOk ?? day.scanOk ?? day.scanRequests ?? day.scanTotal ?? 0) || 0);
+
+      const scanSignalsSent = sigStats
+        ? Number(sigStats.scanSignalsSent || 0)
+        : (Number(day.scanSignalsSent ?? day.scanSent ?? 0) || 0);
+
+      const totalCreated = sigStats
+        ? Number(sigStats.totalSignalsCreated || (autoSent + scanSignalsSent))
+        : (Number(day.totalSignalsCreated ?? day.totalSignalsSent ?? (autoSent + scanSignalsSent)) || 0);
+
+      const tfBreakdownSent =
+        (sigStats && sigStats.tfBreakdownCreated) ||
+        day.tfBreakdownCreated ||
+        day.tfBreakdownSent ||
+        day.tfBreakdownSignals ||
+        day.tfBreakdown ||
+        null;
+
+      const all = await listAllPositions(this.positionsRepo);
+      const active = Array.isArray(this.positionsRepo.listActive?.()) ? this.positionsRepo.listActive() : all.filter(isActivePos);
+      const startMs = startOfUtcDayMs(dateKey);
+
+      const activeList = Array.isArray(active) ? active : [];
+      const pendingEntry = activeList.filter((p) => isActivePos(p) && entryHitTs(p) === 0).length;
+      const filledOpen = activeList.filter((p) => isActivePos(p) && entryHitTs(p) > 0).length;
+      const carriedOpen = activeList.filter((p) => isActivePos(p) && Number(p?.createdAt || 0) > 0 && Number(p.createdAt) < startMs).length;
+
+      const entryHitsToday = (Array.isArray(all) ? all : [])
+        .filter((p) => entryHitTs(p) > 0 && sameUtcDay(entryHitTs(p), dateKey))
+        .length;
+
+      const expiredToday = (Array.isArray(all) ? all : [])
+        .filter((p) => String(p?.status || "").toUpperCase() === "EXPIRED")
+        .filter((p) => sameUtcDay(Number(p?.expiredAt || p?.closedAt || p?.expiresAt || 0), dateKey))
+        .length;
+
+      const closedTodayList = (Array.isArray(all) ? all : [])
+        .filter(isClosedPos)
+        .filter((p) => sameUtcDay(Number(p?.closedAt || 0), dateKey));
+
+      let tp1Today = 0;
+      let tp2Today = 0;
+      let tp3Today = 0;
+      let directSlToday = 0;
+      let givebackToday = 0;
+
+      for (const p of closedTodayList) {
+        const t = tpHitMax(p);
+        const sl = slHit(p);
+        if (t >= 3) tp3Today++;
+        else if (t === 2) tp2Today++;
+        else if (t === 1) tp1Today++;
+        else if (sl) directSlToday++;
+        if (sl && t >= 1) givebackToday++;
+      }
+
+      const closedTrades = closedTodayList.length;
+      const win = tp1Today + tp2Today + tp3Today;
+
+      // Cohort (Created Today) — progress
+      const cohort = (Array.isArray(all) ? all : []).filter((p) => sameUtcDay(Number(p?.createdAt || 0), dateKey));
+      const cohortCreated = cohort.length;
+      const cohortClosedSoFar = cohort.filter(isClosedPos).length;
+      const cohortStillOpen = Math.max(0, cohortCreated - cohortClosedSoFar);
+
+      let cTp1 = 0;
+      let cTp2 = 0;
+      let cTp3 = 0;
+      let cDirectSl = 0;
+      let cGiveback = 0;
+
+      for (const p of cohort.filter(isClosedPos)) {
+        const t = tpHitMax(p);
+        const sl = slHit(p);
+        if (t >= 3) cTp3++;
+        else if (t === 2) cTp2++;
+        else if (t === 1) cTp1++;
+        else if (sl) cDirectSl++;
+        if (sl && t >= 1) cGiveback++;
+      }
+
+      const cohortWins = cTp1 + cTp2 + cTp3;
+      const cohortWinrate = cohortClosedSoFar > 0 ? ((cohortWins / cohortClosedSoFar) * 100).toFixed(1) : "0.0";
+
+      const payload = {
+        dateKey,
+        autoSignalsSent: autoSent,
+        scanRequestsSuccess: scanReqSuccess,
+        scanSignalsSent,
+        totalSignalsCreated: totalCreated,
+        tfBreakdownCreated: tfBreakdownSent,
+        topScore: day.topScore,
+        avgScore: day.avgScore,
+
+        pendingEntry,
+        filledOpen,
+        expiredToday,
+        entryHitsToday,
+        carriedOpen,
+
+        closedTrades,
+        win,
+        tp1: tp1Today,
+        tp2: tp2Today,
+        tp3: tp3Today,
+        directSl: directSlToday,
+        giveback: givebackToday,
+
+        cohortCreated,
+        cohortClosedSoFar,
+        cohortStillOpen,
+        cohortWins,
+        cohortTp1: cTp1,
+        cohortTp2: cTp2,
+        cohortTp3: cTp3,
+        cohortDirectSl: cDirectSl,
+        cohortGiveback: cGiveback,
+        cohortWinrate,
+
+        macroCounts: day.macroCounts,
+        macroSummary: day.macroSummary
+      };
+
+      await this.sender.sendText(msg.chat.id, recapCard(payload));
+    });
     this.bot.onText(/^\/scan\b(.*)$/i, async (msg, match) => {
       const chatId = msg.chat.id;
       const userId = msg.from?.id ?? 0;
@@ -138,9 +629,6 @@ export class Commands {
       })();
 
       if (tfArg && !allowedTfs.includes(tfArg)) {
-        // If Progress UI bubble exists, it already shows a failure message (avoid duplicate spam).
-        if (out.messageId) return;
-
         await this.sender.sendText(chatId, [
           "CLOUD TREND ALERT",
           "━━━━━━━━━━━━━━━━━━",

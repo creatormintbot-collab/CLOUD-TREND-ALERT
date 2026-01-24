@@ -9,15 +9,24 @@ function dayInit() {
   return {
     // Activity (UTC day)
     autoTotal: 0,
+
+    // /scan metrics
     scanTotal: 0,           // legacy: scan signals sent (kept for backward-compat)
     scanRequests: 0,        // best-effort: /scan requests received
+    scanRequestsSuccess: 0, // best-effort: /scan requests completed (non-fatal). See normalization below.
     scanSignalsSent: 0,     // /scan signals actually sent
+
+    // Quality breakdown (signals created)
     tfBreakdown: { "15m": 0, "30m": 0, "1h": 0, "4h": 0 },
     topScore: 0,
     scoreSum: 0,
     scoreCount: 0,
+
+    // Legacy outcomes (kept; detailed TP/SL stats live in positionsRepo)
     win: 0,
     lose: 0,
+
+    // Macro summary (AUTO only)
     macro: { BULLISH: 0, BEARISH: 0, NEUTRAL: 0 }
   };
 }
@@ -29,7 +38,7 @@ export class StateRepo {
       sent: {}, // symbol|tf -> ts (legacy keys may exist)
       lastAutoCandle: {}, // tf -> closeTime
       lastRecapSentForDay: "",
-      lastRankCache: [] // for /top
+      lastRankCache: [] // legacy cache (ranking) still used by pipeline
     };
     this._queue = Promise.resolve();
   }
@@ -40,6 +49,17 @@ export class StateRepo {
     if (!this.state.sent) this.state.sent = {};
     if (!this.state.lastAutoCandle) this.state.lastAutoCandle = {};
     if (!this.state.lastRankCache) this.state.lastRankCache = [];
+    return this.state;
+  }
+
+  // Prefer a cheap in-memory snapshot for command handlers.
+  getSnapshot() {
+    return this.state;
+  }
+
+  // Backward compatible alias.
+  getState() {
+    return this.state;
   }
 
   _day(key = utcDateKey()) {
@@ -52,6 +72,11 @@ export class StateRepo {
     if (day.scanRequests == null) day.scanRequests = 0;
     if (day.scanSignalsSent == null) day.scanSignalsSent = 0;
 
+    // Success counter: if missing, best-effort align with scanRequests (older versions)
+    // Note: once call sites start incrementing scanRequestsSuccess explicitly,
+    // this field will remain independent.
+    if (day.scanRequestsSuccess == null) day.scanRequestsSuccess = day.scanRequests || 0;
+
     if (!day.tfBreakdown) day.tfBreakdown = { "15m": 0, "30m": 0, "1h": 0, "4h": 0 };
     if (day.tfBreakdown["15m"] == null) day.tfBreakdown["15m"] = 0;
     if (day.tfBreakdown["30m"] == null) day.tfBreakdown["30m"] = 0;
@@ -61,6 +86,10 @@ export class StateRepo {
     if (day.topScore == null) day.topScore = 0;
     if (day.scoreSum == null) day.scoreSum = 0;
     if (day.scoreCount == null) day.scoreCount = 0;
+
+    // Provide derived field for UI consumers (do not persist as source of truth).
+    day.avgScore = day.scoreCount > 0 ? Math.round(day.scoreSum / day.scoreCount) : 0;
+
     if (day.win == null) day.win = 0;
     if (day.lose == null) day.lose = 0;
 
@@ -68,6 +97,9 @@ export class StateRepo {
     if (day.macro.BULLISH == null) day.macro.BULLISH = 0;
     if (day.macro.BEARISH == null) day.macro.BEARISH = 0;
     if (day.macro.NEUTRAL == null) day.macro.NEUTRAL = 0;
+
+    // Alias to match newer UI cards (English).
+    day.macroCounts = day.macro;
 
     return day;
   }
@@ -92,6 +124,16 @@ export class StateRepo {
   bumpScanRequest() {
     const day = this._day();
     day.scanRequests += 1;
+
+    // Backward compat: keep success aligned in older flows where we cannot distinguish.
+    // Newer call sites may increment scanRequestsSuccess explicitly.
+    if (day.scanRequestsSuccess < day.scanRequests) day.scanRequestsSuccess = day.scanRequests;
+  }
+
+  // Preferred explicit method: /scan completed successfully (non-fatal) regardless of signal.
+  bumpScanRequestSuccess() {
+    const day = this._day();
+    day.scanRequestsSuccess += 1;
   }
 
   bumpAuto(tf, score, btcState) {

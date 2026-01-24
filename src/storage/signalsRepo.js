@@ -225,10 +225,21 @@ export class SignalsRepo {
     const stats = {
       dateKey: dayKey,
       autoSignalsSent: 0,
+      // scanRequests = total attempts (including throttled/timeout) for backward compatibility
       scanRequests: 0,
+      // success attempts only (ENTRY from SCAN + SCAN_NO_SIGNAL)
+      scanRequestsSuccess: 0,
+      // failed attempts (e.g. TIMEOUT)
+      scanRequestsFailed: 0,
+      // blocked attempts (e.g. cooldown throttled)
+      scanRequestsThrottled: 0,
       scanSignalsSent: 0,
       totalSignalsSent: 0,
       tfBreakdownSent: { "15m": 0, "30m": 0, "1h": 0, "4h": 0 },
+      // optional breakdowns (non-breaking)
+      scanNoSignal: 0,
+      scanTimeout: 0,
+      scanThrottled: 0,
     };
 
     for (const ev of events) {
@@ -240,6 +251,7 @@ export class SignalsRepo {
         if (src === "SCAN") {
           stats.scanSignalsSent++;
           stats.scanRequests++; // a successful /scan is still a request
+          stats.scanRequestsSuccess++;
         }
 
         const tf = String(ev.tf || "").toLowerCase();
@@ -249,8 +261,25 @@ export class SignalsRepo {
       }
 
       // Count /scan attempts that didn't produce a signal.
-      if (ev.type === "SCAN_NO_SIGNAL" || ev.type === "SCAN_TIMEOUT" || ev.type === "SCAN_THROTTLED") {
+      if (ev.type === "SCAN_NO_SIGNAL") {
         stats.scanRequests++;
+        stats.scanRequestsSuccess++;
+        stats.scanNoSignal++;
+        continue;
+      }
+
+      if (ev.type === "SCAN_TIMEOUT") {
+        stats.scanRequests++;
+        stats.scanRequestsFailed++;
+        stats.scanTimeout++;
+        continue;
+      }
+
+      if (ev.type === "SCAN_THROTTLED") {
+        stats.scanRequests++;
+        stats.scanRequestsThrottled++;
+        stats.scanThrottled++;
+        continue;
       }
     }
 

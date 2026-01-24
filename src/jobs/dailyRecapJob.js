@@ -1,4 +1,4 @@
-import { utcNowHHMM, yesterdayUtcKey } from "../utils/time.js";
+import { utcNowHHMM, yesterdayUtcKey, utcDateKey } from "../utils/time.js";
 
 export function startDailyRecapJob({ hhmmUTC = "00:05", run }) {
   let lastTickDay = "";
@@ -14,4 +14,12 @@ export function startDailyRecapJob({ hhmmUTC = "00:05", run }) {
   }, 30_000);
 
   return { stop: () => clearInterval(t) };
+}
+
+// Optional helper for manual trigger (e.g., /info) without duplicating recap logic.
+// Does NOT change existing scheduling behaviour.
+export async function runDailyRecapNow({ run, dayKey = null } = {}) {
+  if (typeof run !== "function") return;
+  const key = dayKey ? String(dayKey) : utcDateKey();
+  await run(key);
 }

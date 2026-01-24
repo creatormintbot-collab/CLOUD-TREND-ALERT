@@ -21,6 +21,21 @@ export function createPositionFromSignal(
     createdAt: Date.now(),
     candleCloseTime: signal.candleCloseTime,
 
+    // Lifecycle timestamps (UTC ms)
+    openedAt: null,
+    entryHitAt: null,
+    entryHitNotified: false,
+    entryHitNotifiedAt: null,
+
+    expiresAt: null,
+    expiredAt: null,
+
+    // Outcome helpers (daily recap / status)
+    tpHitMax: 0,
+    slHit: false,
+    slHitAt: null,
+
+
     score: signal.score,
     macro: signal.macro,
     points: signal.points,

@@ -38,7 +38,22 @@ export class Pipeline {
     return this.env?.SECONDARY_MIN_SCORE ?? null;
   }
 
+  // /top (LOCKED): Top 10 volume (cached)
+  // Returns array of { symbol, quoteVolume } rows when available.
+  async topVolumeCached(n = 10) {
+    try {
+      if (typeof this.universe?.topVolumeRows === "function") return this.universe.topVolumeRows(n);
+      if (typeof this.universe?.topSymbols === "function") {
+        return this.universe.topSymbols().slice(0, n).map((s) => ({ symbol: s, quoteVolume: 0 }));
+      }
+      if (typeof this.universe?.symbols === "function") {
+        return this.universe.symbols().slice(0, n).map((s) => ({ symbol: s, quoteVolume: 0 }));
+      }
+    } catch {}
+    return [];
+  }
 
+  // Backward compatible: ranking cache (still used internally; /top no longer relies on it)
   topRanked() {
     return this.stateRepo.getRankCache();
   }

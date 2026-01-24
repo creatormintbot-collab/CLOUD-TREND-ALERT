@@ -150,6 +150,8 @@ export class Monitor {
                 Number.isFinite(Number(pos?.filledPrice)) ? Number(pos.filledPrice)
                 : (Number.isFinite(Number(pos?.levels?.entryMid)) ? Number(pos.levels.entryMid) : null)
               );
+          // Ensure entryHitAt exists for UTC-day metrics (status/recap)
+          pos.entryHitAt = pos.entryHitAt || Number(pos.filledAt) || nowMs;
           return { pos, event: "FILLED", price: pForEntry };
         }
 
@@ -203,6 +205,7 @@ export class Monitor {
 
             if (triggerOk) {
               pos.filledAt = nowMs;
+              pos.entryHitAt = pos.entryHitAt || nowMs;
               pos.filledPrice = Number(price);
               pos.openedAt = pos.openedAt || nowMs;
               pos.status = "RUNNING";
@@ -279,6 +282,7 @@ export class Monitor {
       // Mark ENTRY CONFIRMED as notified only AFTER broadcasting to all notifyChatIds.
       if (entryText && recipients.length) {
         pos.entryHitNotifiedAt = Number(pos.filledAt) || Date.now();
+        pos.entryHitAt = pos.entryHitAt || pos.entryHitNotifiedAt;
         pos.entryHitNotified = true;
       }
 

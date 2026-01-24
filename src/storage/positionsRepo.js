@@ -27,6 +27,21 @@ export class PositionsRepo {
     }
 
     this.positions = (data && typeof data === "object") ? data : {};
+    return this.positions;
+  }
+
+  // New: list all positions (required for /status + /info + recap aggregation)
+  listAll() {
+    return Object.values(this.positions);
+  }
+
+  // Backward compatible aliases
+  list() {
+    return this.listAll();
+  }
+
+  getAll() {
+    return this.listAll();
   }
 
   listActive() {

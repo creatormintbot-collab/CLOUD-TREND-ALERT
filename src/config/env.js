@@ -11,6 +11,10 @@ function list(v) {
   return String(v).split(",").map((x) => x.trim()).filter(Boolean);
 }
 
+function listNum(v) {
+  return list(v).map((x) => Number(x)).filter((n) => Number.isFinite(n));
+}
+
 export const env = {
   TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN || "",
   ALLOWED_GROUP_IDS: list(process.env.ALLOWED_GROUP_IDS).map(String),
@@ -61,6 +65,15 @@ export const env = {
   NO_TRADE_EMA200_ATR_K: num(process.env.NO_TRADE_EMA200_ATR_K, 0.3),
   EXTEND_ATR_K: num(process.env.EXTEND_ATR_K, 1.5),
 
+  // CTA soft gate thresholds (recommended)
+  CTA_SOFT_MIN_SCORE_AUTO: num(process.env.CTA_SOFT_MIN_SCORE_AUTO, 0),
+  CTA_SOFT_MIN_SCORE_SCAN: num(process.env.CTA_SOFT_MIN_SCORE_SCAN, 0),
+
+  // Pullback relax (recommended)
+  PULLBACK_MAX_ATR_AUTO: num(process.env.PULLBACK_MAX_ATR_AUTO, 0),
+  PULLBACK_MAX_ATR_SCAN: num(process.env.PULLBACK_MAX_ATR_SCAN, 0),
+
+
   MAX_SIGNALS_PER_DAY: num(process.env.MAX_SIGNALS_PER_DAY, 5),
   COOLDOWN_MINUTES: num(process.env.COOLDOWN_MINUTES, 120),
 
@@ -79,6 +92,15 @@ export const env = {
   PORT: num(process.env.PORT, 3000),
   DISABLE_WEBHOOKS: bool(process.env.DISABLE_WEBHOOKS, true),
   LOG_LEVEL: process.env.LOG_LEVEL || "info",
+
+  CHART_RENDERER_DEBUG: bool(process.env.CHART_RENDERER_DEBUG, false),
+
+  // Ichimoku HTF Compass (LOCKED)
+  ICHIMOKU_ENABLED: bool(process.env.ICHIMOKU_ENABLED, false),
+  ICHIMOKU_TF: (process.env.ICHIMOKU_TF || "4h").toLowerCase(),
+  ICHIMOKU_SETTINGS: listNum(process.env.ICHIMOKU_SETTINGS || "9,26,52,26"),
+
+
 
   AUTO_MIN_SCORE: num(process.env.AUTO_MIN_SCORE, 85),
 

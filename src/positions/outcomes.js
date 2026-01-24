@@ -14,3 +14,36 @@ export function isWinOutcome(outcome) {
 
   return false;
 }
+
+export function getTpHitMax(pos) {
+  if (!pos) return 0;
+  const v = Number(pos.tpHitMax);
+  if (Number.isFinite(v) && v >= 0) return v;
+  if (pos.hitTP3) return 3;
+  if (pos.hitTP2) return 2;
+  if (pos.hitTP1) return 1;
+  return 0;
+}
+
+export function isGiveback(pos) {
+  if (!pos) return false;
+  const tp = getTpHitMax(pos);
+  const sl = Boolean(pos.slHit) || String(pos.closeOutcome || '').toUpperCase().includes('STOP_LOSS');
+  return sl && tp >= 1 && String(pos.status || '').toUpperCase() === 'CLOSED';
+}
+
+export function isDirectSL(pos) {
+  if (!pos) return false;
+  const tp = getTpHitMax(pos);
+  const sl = Boolean(pos.slHit) || String(pos.closeOutcome || '').toUpperCase().includes('STOP_LOSS');
+  return sl && tp === 0 && String(pos.status || '').toUpperCase() === 'CLOSED';
+}
+
+export function getOutcomeBucket(pos) {
+  const tp = getTpHitMax(pos);
+  if (tp >= 3) return 'TP3';
+  if (tp === 2) return 'TP2';
+  if (tp === 1) return 'TP1';
+  if (isDirectSL(pos)) return 'SL';
+  return 'UNKNOWN';
+}

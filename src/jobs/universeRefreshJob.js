@@ -1,5 +1,6 @@
-export function startUniverseRefreshJob({ hours = 6, run, onError }) {
-  const ms = Number(hours) * 3_600_000;
+export function startUniverseRefreshJob({ hours = 6, run, onError, immediate = true }) {
+  const h = Number(hours);
+  const ms = (Number.isFinite(h) && h > 0 ? h : 6) * 3_600_000;
 
   let running = false;
   const tick = () => {
@@ -23,5 +24,6 @@ export function startUniverseRefreshJob({ hours = 6, run, onError }) {
   };
 
   const t = setInterval(tick, ms);
+  if (immediate) tick();
   return { stop: () => clearInterval(t) };
 }
