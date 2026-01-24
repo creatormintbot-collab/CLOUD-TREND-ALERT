@@ -13,9 +13,12 @@ process.on("uncaughtException", (err) => {
   setTimeout(() => process.exit(1), 250);
 });
 
+logger.info("starting");
+
 let app;
 try {
   app = await bootstrap();
+  logger.info("bootstrap_ok");
   setupGracefulShutdown(app);
 } catch (err) {
   logger.error({ err }, "bootstrap_failed");
