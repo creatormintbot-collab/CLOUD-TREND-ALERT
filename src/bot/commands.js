@@ -138,6 +138,9 @@ export class Commands {
       })();
 
       if (tfArg && !allowedTfs.includes(tfArg)) {
+        // If Progress UI bubble exists, it already shows a failure message (avoid duplicate spam).
+        if (out.messageId) return;
+
         await this.sender.sendText(chatId, [
           "CLOUD TREND ALERT",
           "━━━━━━━━━━━━━━━━━━",

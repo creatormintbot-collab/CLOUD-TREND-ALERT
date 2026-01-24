@@ -75,11 +75,11 @@ export class ProgressUi {
 
       await this.sender.editText(chatId, msg.message_id, "✅ AI Futures Signal Generated! 100%");
       return { kind: "OK", elapsedMs: elapsed(), result: res, messageId: msg?.message_id || null };
-    } catch {
+    } catch (e) {
       if (msg?.message_id) {
-        await this.sender.editText(chatId, msg.message_id, "⚠️ Scan timeout. Please try again.");
+        await this.sender.editText(chatId, msg.message_id, "⚠️ Scan failed. Try again later.");
       }
-      return { kind: "TIMEOUT", elapsedMs: elapsed(), result: null, messageId: msg?.message_id || null };
+      return { kind: "ERROR", elapsedMs: elapsed(), result: null, messageId: msg?.message_id || null, error: e };
     } finally {
       this.unlock(key);
     }

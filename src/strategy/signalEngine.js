@@ -112,7 +112,6 @@ function ichimokuCompass(candles, opts = {}) {
 
   return {
     ok: true,
-    tf,
     bias,
     tk,
     spanA: a,
@@ -513,8 +512,7 @@ export function evaluateSignal({ symbol, tf, klines, thresholds, env = {}, isAut
     ok: true,
     tf,
     symbol,
-    tf,
-    direction: core.direction,
+        direction: core.direction,
     candleCloseTime: core.last.closeTime,
     score,
     scoreRaw,
