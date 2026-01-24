@@ -6,6 +6,8 @@ export class ProgressUi {
     this.locks = new Map();     // key -> boolean
     this.lastAt = new Map();    // key -> ms
     this.THROTTLE_MS = 7000;    // hard throttle to reduce spam
+    this.TIMEOUT_MS = 60000;   // /scan hard timeout (ms)
+    this.STEP_DELAY_MS = 200;  // UI delay per step (ms)
   }
 
   _key(chatId, userId) {
@@ -45,23 +47,23 @@ export class ProgressUi {
 
     try {
       msg = await this.sender.sendText(chatId, "🧠 Booting AI Core… 0%");
-      await sleep(1000);
+      await sleep(this.STEP_DELAY_MS);
 
       await this.sender.editText(chatId, msg.message_id, "🔎 Finding the best setup… 50%");
-      await sleep(1000);
+      await sleep(this.STEP_DELAY_MS);
 
       // LOCKED: no double 90%
       await this.sender.editText(chatId, msg.message_id, "🤖 Finalizing data… 90%");
-      await sleep(1000);
+      await sleep(this.STEP_DELAY_MS);
 
-      if (elapsed() > 20_000) {
+      if (elapsed() > this.TIMEOUT_MS) {
         await this.sender.editText(chatId, msg.message_id, "⚠️ Scan timeout. Please try again.");
         return { kind: "TIMEOUT", elapsedMs: elapsed(), result: null, messageId: msg?.message_id || null };
       }
 
       const res = await fn();
 
-      if (elapsed() > 20_000) {
+      if (elapsed() > this.TIMEOUT_MS) {
         await this.sender.editText(chatId, msg.message_id, "⚠️ Scan timeout. Please try again.");
         return { kind: "TIMEOUT", elapsedMs: elapsed(), result: null, messageId: msg?.message_id || null };
       }

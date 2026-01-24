@@ -198,8 +198,8 @@ export class Commands {
 
           const elapsedMs = Date.now() - startedAt;
           out = res ? { kind: "OK", result: res, elapsedMs } : { kind: "NO_SIGNAL", elapsedMs };
-        } catch {
-          out = { kind: "TIMEOUT", elapsedMs: Date.now() - startedAt };
+        } catch (e) {
+          out = { kind: "ERROR", elapsedMs: Date.now() - startedAt, error: e };
         }
       }
 
@@ -253,10 +253,38 @@ export class Commands {
           elapsedMs: out.elapsedMs
         });
 
-        // Avoid silent failures for targeted scans (no Progress UI bubble here).
+        // If Progress UI bubble exists, it already shows a timeout message (avoid duplicate spam).
+        if (!out.messageId) {
+          await this.sender.sendText(chatId, [
+            "CLOUD TREND ALERT",
+            "⚠️ Scan timed out. Try again later."
+          ].join("\n"));
+        }
+        return;
+      }
+
+      if (out.kind === "ERROR") {
+        const errMsg =
+          (out.error && (out.error.message || out.error.stack || String(out.error))) ||
+          "UNKNOWN_ERROR";
+
+        // Log as timeout bucket with explicit meta (keeps repo API unchanged).
+        try {
+          await this.signalsRepo.logScanTimeout({
+            chatId,
+            query: { symbol: symbolUsed || null, tf: tfArg || null, raw: raw || "" },
+            elapsedMs: out.elapsedMs,
+            meta: { reason: "EXCEPTION", err: errMsg.slice(0, 500) }
+          });
+        } catch {}
+
         await this.sender.sendText(chatId, [
-          "Cloud Trend Alert",
-          "⚠️ Scan timed out. Try again later."
+          "CLOUD TREND ALERT",
+          "━━━━━━━━━━━━━━━━━━",
+          "⚠️ Scan failed. Try again later.",
+          "",
+          "Note:",
+          "• If this keeps happening, check VPS logs for the underlying error."
         ].join("\n"));
         return;
       }
