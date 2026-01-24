@@ -80,5 +80,25 @@ export const env = {
   DISABLE_WEBHOOKS: bool(process.env.DISABLE_WEBHOOKS, true),
   LOG_LEVEL: process.env.LOG_LEVEL || "info",
 
-  AUTO_MIN_SCORE: num(process.env.AUTO_MIN_SCORE, 85)
+  AUTO_MIN_SCORE: num(process.env.AUTO_MIN_SCORE, 85),
+
+  // HTF permission hard gate (optional)
+  HTF_HARD_GATE_ENABLED: bool(process.env.HTF_HARD_GATE_ENABLED, true),
+  HTF_RECLAIM_MUST_CONFIRM: bool(process.env.HTF_RECLAIM_MUST_CONFIRM, true),
+  HTF_MAX_EMA21_DIST_ATR: num(process.env.HTF_MAX_EMA21_DIST_ATR, 0.75),
+
+  // Chop / range hard gate (optional)
+  CHOP_FILTER_ENABLED: bool(process.env.CHOP_FILTER_ENABLED, true),
+  CHOP_MIN_ADX: num(process.env.CHOP_MIN_ADX, 20),
+  CHOP_MIN_ATR_PCT: num(process.env.CHOP_MIN_ATR_PCT, 0.0025),
+  CHOP_MIN_EMA_SEP_ATR: num(process.env.CHOP_MIN_EMA_SEP_ATR, 0.2),
+
+  // Setup -> Trigger confirmation (optional)
+  TRIGGER_ENABLED: bool(process.env.TRIGGER_ENABLED, true),
+  TRIGGER_MODE: (process.env.TRIGGER_MODE || "EMA21_RSI_TURN").trim(),
+
+  // Monitor entry confirmation (optional)
+  ENTRY_CONFIRM_MODE: (process.env.ENTRY_CONFIRM_MODE || "MID_CROSS").trim(),
+  ENTRY_CONFIRM_DWELL_MS: num(process.env.ENTRY_CONFIRM_DWELL_MS, 15000),
+  ENTRY_CONFIRM_MAX_WAIT_MS: num(process.env.ENTRY_CONFIRM_MAX_WAIT_MS, 0)
 };

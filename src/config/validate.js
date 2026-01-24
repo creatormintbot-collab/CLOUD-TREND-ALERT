@@ -53,4 +53,39 @@ export function validateEnvOrThrow() {
   if (Number(env.AUTO_VOLUME_TOP_N) > 0 && !Number.isInteger(Number(env.AUTO_VOLUME_TOP_N))) {
     throw new Error("AUTO_VOLUME_TOP_N must be an integer");
   }
+
+  // Hard gate / confirmation knobs (optional)
+  if (!Number.isFinite(env.HTF_MAX_EMA21_DIST_ATR) || Number(env.HTF_MAX_EMA21_DIST_ATR) < 0) {
+    throw new Error("HTF_MAX_EMA21_DIST_ATR must be a finite number >= 0");
+  }
+
+  if (!Number.isFinite(env.CHOP_MIN_ADX) || Number(env.CHOP_MIN_ADX) < 0) {
+    throw new Error("CHOP_MIN_ADX must be a finite number >= 0");
+  }
+  if (!Number.isFinite(env.CHOP_MIN_ATR_PCT) || Number(env.CHOP_MIN_ATR_PCT) < 0 || Number(env.CHOP_MIN_ATR_PCT) > 1) {
+    throw new Error("CHOP_MIN_ATR_PCT must be a finite number between 0 and 1");
+  }
+  if (!Number.isFinite(env.CHOP_MIN_EMA_SEP_ATR) || Number(env.CHOP_MIN_EMA_SEP_ATR) < 0) {
+    throw new Error("CHOP_MIN_EMA_SEP_ATR must be a finite number >= 0");
+  }
+
+  if (env.TRIGGER_ENABLED) {
+    const tm = String(env.TRIGGER_MODE || "").trim();
+    const allowedTriggerModes = new Set(["EMA21_RSI_TURN", "EMA21_CLOSE", "RSI_TURN", "MACD_HIST_TURN"]);
+    if (!allowedTriggerModes.has(tm)) {
+      throw new Error(`TRIGGER_MODE invalid: ${tm}`);
+    }
+  }
+
+  const ecm = String(env.ENTRY_CONFIRM_MODE || "").trim();
+  const allowedEntryConfirmModes = new Set(["MID_CROSS", "IMMEDIATE"]);
+  if (!allowedEntryConfirmModes.has(ecm)) {
+    throw new Error(`ENTRY_CONFIRM_MODE invalid: ${ecm}`);
+  }
+  if (!Number.isFinite(env.ENTRY_CONFIRM_DWELL_MS) || Number(env.ENTRY_CONFIRM_DWELL_MS) < 0) {
+    throw new Error("ENTRY_CONFIRM_DWELL_MS must be a finite number >= 0");
+  }
+  if (!Number.isFinite(env.ENTRY_CONFIRM_MAX_WAIT_MS) || Number(env.ENTRY_CONFIRM_MAX_WAIT_MS) < 0) {
+    throw new Error("ENTRY_CONFIRM_MAX_WAIT_MS must be a finite number >= 0");
+  }
 }
