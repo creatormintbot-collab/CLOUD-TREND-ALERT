@@ -141,6 +141,18 @@ export class Monitor {
         // --- ENTRY lifecycle: pending -> filled or expired ---
         const filled = isFilled(pos);
 
+        // If a position is already FILLED (e.g. restored after restart) but ENTRY CONFIRMED was never sent,
+        // emit a one-time FILLED event so the notifier can broadcast to all recipients.
+        if (filled && !pos.entryHitNotifiedAt && !pos.entryHitNotified) {
+          const pForEntry = Number.isFinite(Number(price))
+            ? Number(price)
+            : (
+                Number.isFinite(Number(pos?.filledPrice)) ? Number(pos.filledPrice)
+                : (Number.isFinite(Number(pos?.levels?.entryMid)) ? Number(pos.levels.entryMid) : null)
+              );
+          return { pos, event: "FILLED", price: pForEntry };
+        }
+
         if (!filled) {
           // best-effort timestamps (non-breaking)
           const createdAt = Number(pos.createdAt ?? pos.created ?? pos.ts ?? pos.openedAt ?? 0) || nowMs;
@@ -225,9 +237,24 @@ export class Monitor {
         this.stateRepo.bumpOutcome(pos.closedAt, isWinOutcome(pos.closeOutcome));
       }
 
-      const recipients = (Array.isArray(pos.notifyChatIds) && pos.notifyChatIds.length)
+      const recipientsRaw = (Array.isArray(pos.notifyChatIds) && pos.notifyChatIds.length)
         ? pos.notifyChatIds
         : fallbackChatIdsToNotify;
+
+      // Normalize + dedupe recipients to prevent partial delivery issues on broadcast.
+      const recipients = Array.from(new Set((recipientsRaw || []).map(String)));
+
+      // Precompute ENTRY CONFIRMED payload once, then broadcast to all recipients before setting notified flags.
+      const shouldSendEntry =
+        ev.event === "FILLED" && !pos.entryHitNotifiedAt && !pos.entryHitNotified;
+
+      const entryText = shouldSendEntry
+        ? (
+            (this.cards && typeof this.cards.entryHitCard === "function")
+              ? this.cards.entryHitCard(pos, ev.price)
+              : entryHitCardText(pos, ev.price)
+          )
+        : null;
 
       for (const chatId of recipients) {
         const replyTo =
@@ -244,18 +271,15 @@ export class Monitor {
         else if (ev.event === "TP3") await send(this.cards.tp3Card(pos));
         else if (ev.event === "SL") await send(this.cards.slCard(pos));
         else if (ev.event === "FILLED") {
-          // Send ENTRY HIT once per position (no spam)
-          if (!pos.entryHitNotifiedAt && !pos.entryHitNotified) {
-            const txt =
-              (this.cards && typeof this.cards.entryHitCard === "function")
-                ? this.cards.entryHitCard(pos, ev.price)
-                : entryHitCardText(pos, ev.price);
-            await send(txt);
-            pos.entryHitNotifiedAt = Number(pos.filledAt) || Date.now();
-            pos.entryHitNotified = true;
-          }
+          if (entryText) await send(entryText);
         }
         // EXPIRED is tracked in logs/state, but not sent to chat by default.
+      }
+
+      // Mark ENTRY CONFIRMED as notified only AFTER broadcasting to all notifyChatIds.
+      if (entryText && recipients.length) {
+        pos.entryHitNotifiedAt = Number(pos.filledAt) || Date.now();
+        pos.entryHitNotified = true;
       }
 
       await this.signalsRepo.logLifecycle({
