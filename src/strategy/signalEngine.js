@@ -11,6 +11,21 @@ import { finalScore } from "./scoring/finalScore.js";
 import { btcMacro } from "./macro/btcMacro.js";
 import { ctaProTrendGate } from "./ctaProTrend.js";
 
+import {
+  HTF_HARD_GATE_ENABLED,
+  HTF_BLOCK_ON_RECLAIM_NOT_CONFIRMED,
+  HTF_MAX_EMA21_DIST_ATR,
+  CHOP_FILTER_ENABLED,
+  CHOP_MIN_ADX,
+  CHOP_MIN_ATR_PCT,
+  CHOP_MIN_EMA_SEP_ATR,
+  TRIGGER_CONFIRM_ENABLED,
+  TRIGGER_REQUIRE_CLOSE_RECLAIM_EMA21,
+  TRIGGER_REQUIRE_RSI_TURN,
+  TRIGGER_REQUIRE_MACD_HIST_TURN,
+} from "../config/constants.js";
+
+
 // Ichimoku (9,26,52,26) HTF compass (LOCKED): used as direction filter on 4H.
 // For /scan: NEUTRAL/UNKNOWN is allowed but penalized in score.
 // For AUTO: NEUTRAL/UNKNOWN is rejected (hard gate).
@@ -97,6 +112,7 @@ function ichimokuCompass(candles, opts = {}) {
 
   return {
     ok: true,
+    tf,
     bias,
     tk,
     spanA: a,
@@ -129,7 +145,7 @@ function pickTrendTf(entryTf, thresholds, env) {
   if (explicit) return explicit;
 
   const tf = String(entryTf || "").toLowerCase();
-  if (tf === "15m") return "1h";
+  if (tf === "15m") return "4h";
   if (tf === "30m") return "4h";
   if (tf === "1h") return "4h";
   if (tf === "4h") return "4h";
@@ -160,6 +176,7 @@ function computeCore({ symbol, tf, klines, thresholds, env = {}, isAuto }) {
   const i = candles.length - 1;
   const e21 = ema21[i], e55 = ema55[i], e200 = ema200[i];
   const r14 = rr[i], atr14 = aa[i], adx14 = dd[i];
+  const r14Prev = rr[i - 1];
 
   if (e55 == null || e200 == null || e21 == null || r14 == null || atr14 == null || adx14 == null) {
     return { ok: false, reason: "INDICATORS_NOT_READY", metrics: {} };
@@ -252,14 +269,15 @@ function computeCore({ symbol, tf, klines, thresholds, env = {}, isAuto }) {
 
   return {
     ok: true,
+    tf,
     candles,
     last,
     close,
     i,
     direction,
     ema: { e21, e55, e200 },
-    ind: { r14, atr14, adx14, atrPct, distAtr, pullbackMaxAtr: pbMax, sma20: sm[i] },
-    macd: { ...mc, gateOk },
+    ind: { r14, r14Prev, atr14, adx14, atrPct, distAtr, pullbackMaxAtr: pbMax, sma20: sm[i] },
+    macd: { ...mc, gateOk, histNow: mc.hist[i], histPrev: mc.hist[i - 1] },
     macro,
     base,
     pro,
@@ -270,9 +288,148 @@ function computeCore({ symbol, tf, klines, thresholds, env = {}, isAuto }) {
   };
 }
 
+function _bool(v, def = false) {
+  if (v === true || v === "true" || v === 1 || v === "1") return true;
+  if (v === false || v === "false" || v === 0 || v === "0") return false;
+  return def;
+}
+
+function _num(v, def) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : def;
+}
+
+function _isLtf(tf) {
+  const t = String(tf || "").toLowerCase();
+  return t === "15m" || t === "30m" || t === "1h";
+}
+
+function htfPermissionGate({ symbol, tf, klines, thresholds, env = {}, isAuto }) {
+  // HARD GATE: HTF (default 4H) is the permission layer for LTF signals.
+  const enabled = _bool(env?.HTF_HARD_GATE_ENABLED ?? thresholds?.HTF_HARD_GATE_ENABLED ?? HTF_HARD_GATE_ENABLED, true);
+  if (!enabled) return { ok: true };
+
+  if (!_isLtf(tf)) return { ok: true };
+
+  const htfTf = String(env?.SECONDARY_TIMEFRAME || "4h").toLowerCase();
+  const entryTf = String(tf || "").toLowerCase();
+  if (entryTf === htfTf) return { ok: true };
+
+  const htf = computeCore({ symbol, tf: htfTf, klines, thresholds, env, isAuto });
+  if (!htf.ok) return { ok: false, reason: "HTF_NOT_READY" };
+
+  // If HTF CTA is enabled, certain reasons become HARD blocks for LTF.
+  const blockReclaim = _bool(
+    env?.HTF_BLOCK_ON_RECLAIM_NOT_CONFIRMED ?? thresholds?.HTF_BLOCK_ON_RECLAIM_NOT_CONFIRMED ?? HTF_BLOCK_ON_RECLAIM_NOT_CONFIRMED,
+    true
+  );
+
+  if (htf.ctaGate?.enabled && !htf.ctaGate.ok) {
+    if (htf.ctaGate.hardBlock) return { ok: false, reason: `HTF_${htf.ctaGate.reason || "CTA_BLOCK"}` };
+    if (blockReclaim && String(htf.ctaGate.reason || "") === "RECLAIM_NOT_CONFIRMED") {
+      return { ok: false, reason: "HTF_RECLAIM_NOT_CONFIRMED" };
+    }
+  }
+
+  // HTF distance-to-EMA21 (ATR units) hard gate.
+  const maxDist = _num(env?.HTF_MAX_EMA21_DIST_ATR ?? thresholds?.HTF_MAX_EMA21_DIST_ATR ?? HTF_MAX_EMA21_DIST_ATR, 0.75);
+  if (Number.isFinite(maxDist)) {
+    const d = Number(htf?.ind?.distAtr);
+    if (Number.isFinite(d) && d > maxDist) return { ok: false, reason: "HTF_TOO_FAR_FROM_EMA21" };
+  }
+
+  return { ok: true, htf };
+}
+
+function chopGate(core, thresholds, env = {}) {
+  const enabled = _bool(env?.CHOP_FILTER_ENABLED ?? thresholds?.CHOP_FILTER_ENABLED ?? CHOP_FILTER_ENABLED, true);
+  if (!enabled) return { ok: true };
+
+  if (!_isLtf(core?.tf)) return { ok: true };
+
+  const minAdx = _num(env?.CHOP_MIN_ADX ?? thresholds?.CHOP_MIN_ADX ?? CHOP_MIN_ADX, 18);
+  const minAtrPct = _num(env?.CHOP_MIN_ATR_PCT ?? thresholds?.CHOP_MIN_ATR_PCT ?? CHOP_MIN_ATR_PCT, 0.0035);
+  const minEmaSep = _num(env?.CHOP_MIN_EMA_SEP_ATR ?? thresholds?.CHOP_MIN_EMA_SEP_ATR ?? CHOP_MIN_EMA_SEP_ATR, 0.25);
+
+  const adx14 = Number(core?.ind?.adx14);
+  const atrPct = Number(core?.ind?.atrPct);
+  const atr14 = Number(core?.ind?.atr14) || 0;
+  const e21 = Number(core?.ema?.e21);
+  const e55 = Number(core?.ema?.e55);
+
+  const emaSepAtr =
+    (Number.isFinite(e21) && Number.isFinite(e55) && atr14 > 0)
+      ? (Math.abs(e21 - e55) / atr14)
+      : null;
+
+  if (Number.isFinite(minAdx) && Number.isFinite(adx14) && adx14 < minAdx) return { ok: false, reason: "CHOP_ADX_LOW" };
+  if (Number.isFinite(minAtrPct) && Number.isFinite(atrPct) && atrPct < minAtrPct) return { ok: false, reason: "CHOP_ATR_LOW" };
+  if (Number.isFinite(minEmaSep) && emaSepAtr != null && emaSepAtr < minEmaSep) return { ok: false, reason: "CHOP_EMA_SEP_LOW" };
+
+  return { ok: true, emaSepAtr };
+}
+
+function triggerGate(core, thresholds, env = {}) {
+  const enabled = _bool(env?.TRIGGER_CONFIRM_ENABLED ?? thresholds?.TRIGGER_CONFIRM_ENABLED ?? TRIGGER_CONFIRM_ENABLED, true);
+  if (!enabled) return { ok: true };
+
+  if (!_isLtf(core?.tf)) return { ok: true };
+
+  const needCloseReclaim = _bool(
+    env?.TRIGGER_REQUIRE_CLOSE_RECLAIM_EMA21 ?? thresholds?.TRIGGER_REQUIRE_CLOSE_RECLAIM_EMA21 ?? TRIGGER_REQUIRE_CLOSE_RECLAIM_EMA21,
+    true
+  );
+  const needRsiTurn = _bool(
+    env?.TRIGGER_REQUIRE_RSI_TURN ?? thresholds?.TRIGGER_REQUIRE_RSI_TURN ?? TRIGGER_REQUIRE_RSI_TURN,
+    true
+  );
+  const needMacdTurn = _bool(
+    env?.TRIGGER_REQUIRE_MACD_HIST_TURN ?? thresholds?.TRIGGER_REQUIRE_MACD_HIST_TURN ?? TRIGGER_REQUIRE_MACD_HIST_TURN,
+    false
+  );
+
+  const close = Number(core?.close);
+  const e21 = Number(core?.ema?.e21);
+  const rNow = Number(core?.ind?.r14);
+  const rPrev = Number(core?.ind?.r14Prev);
+  const hNow = core?.macd?.histNow;
+  const hPrev = core?.macd?.histPrev;
+
+  if (!Number.isFinite(close) || !Number.isFinite(e21) || !core?.direction) return { ok: false, reason: "TRIGGER_NOT_READY" };
+
+  const long = core.direction === "LONG";
+  const closeReclaimOk = !needCloseReclaim ? true : (long ? (close > e21) : (close < e21));
+
+  const rsiTurnOk = !needRsiTurn
+    ? true
+    : (Number.isFinite(rPrev) && Number.isFinite(rNow)
+        ? (long ? (rNow > rPrev) : (rNow < rPrev))
+        : false);
+
+  const macdTurnOk = !needMacdTurn
+    ? true
+    : (hPrev != null && hNow != null
+        ? (long ? (hNow >= hPrev) : (hNow <= hPrev))
+        : false);
+
+  if (!closeReclaimOk) return { ok: false, reason: "TRIGGER_CLOSE_NOT_CONFIRMED" };
+  if (!rsiTurnOk) return { ok: false, reason: "TRIGGER_RSI_NOT_TURNING" };
+  if (!macdTurnOk) return { ok: false, reason: "TRIGGER_MACD_NOT_TURNING" };
+
+  return { ok: true };
+}
+
+
 export function evaluateSignal({ symbol, tf, klines, thresholds, env = {}, isAuto }) {
   const core = computeCore({ symbol, tf, klines, thresholds, env, isAuto });
   if (!core.ok) return { ok: false };
+
+  // HTF permission layer (HARD GATE): LTF must not publish when HTF rejects.
+  const htfPerm = htfPermissionGate({ symbol, tf, klines, thresholds, env, isAuto });
+  if (!htfPerm.ok) return { ok: false };
+
+  // Direction lock: if HTF has a clear direction, LTF must not contradict it.
+  if (htfPerm.htf?.direction && core.direction && htfPerm.htf.direction !== core.direction) return { ok: false };
 
   const softMinAuto = Number(env?.CTA_SOFT_MIN_SCORE_AUTO ?? thresholds?.CTA_SOFT_MIN_SCORE_AUTO ?? thresholds?.AUTO_MIN_SCORE ?? 85);
   const softMinScan = Number(env?.CTA_SOFT_MIN_SCORE_SCAN ?? thresholds?.CTA_SOFT_MIN_SCORE_SCAN ?? 75);
@@ -282,6 +439,9 @@ export function evaluateSignal({ symbol, tf, klines, thresholds, env = {}, isAut
   // - hardBlock reasons => always block
   // - softFail reasons => allow only if score is already strong (keeps precision while avoiding "0 signal" days)
   if (core.ctaGate?.enabled && !core.ctaGate.ok) {
+    // On LTF, RECLAIM_NOT_CONFIRMED is treated as a HARD block (prevents early fakeouts).
+    if (_isLtf(tf) && String(core.ctaGate.reason || "") === "RECLAIM_NOT_CONFIRMED") return { ok: false };
+
     if (core.ctaGate.hardBlock) return { ok: false };
     if (Number(core.fin.total || 0) < softMinScore) return { ok: false };
   }
@@ -302,11 +462,20 @@ export function evaluateSignal({ symbol, tf, klines, thresholds, env = {}, isAut
   if (isAuto && (core.ichimoku?.bias === "NEUTRAL" || core.ichimoku?.bias === "UNKNOWN")) return { ok: false };
 
   if (!core.direction) return { ok: false };
+
+  // Chop / range hard filter (prevents high scores in sideways markets).
+  const chop = chopGate(core, thresholds, env);
+  if (!chop.ok) return { ok: false };
+
   if (!core.pullbackOk) return { ok: false };
   if (core.fin.total < 70) return { ok: false };
 
   // AUTO publish gate: MACD must confirm direction
   if (isAuto && !core.macd.gateOk) return { ok: false };
+
+  // 2-step confirmation: Setup -> Trigger
+  const trig = triggerGate(core, thresholds, env);
+  if (!trig.ok) return { ok: false };
 
   const entryMid = core.close;
   const lv = levelsFromATR({
@@ -342,6 +511,7 @@ export function evaluateSignal({ symbol, tf, klines, thresholds, env = {}, isAut
 
   return {
     ok: true,
+    tf,
     symbol,
     tf,
     direction: core.direction,
@@ -434,8 +604,38 @@ export function explainSignal({ symbol, tf, klines, thresholds, env = {}, isAuto
     isValidSetup &&
     Number(score || 0) < Number(secondaryMinScore);
 
-  const blocked = !!secondaryBlocked;
-  const blockReason = blocked ? `Secondary filter (score < ${secondaryMinScore})` : null;
+  // Additional hard gates (reported as BLOCKED so /scan can show WATCHLIST-style output).
+  const htfPerm = htfPermissionGate({ symbol, tf, klines, thresholds, env, isAuto });
+  const htfBlocked = isValidSetup && !htfPerm.ok;
+
+  const htfDirMismatch =
+    isValidSetup &&
+    !!htfPerm?.htf?.direction &&
+    !!core.direction &&
+    String(htfPerm.htf.direction) !== String(core.direction);
+
+  const chop = chopGate(core, thresholds, env);
+  const chopBlocked = isValidSetup && !chop.ok;
+
+  const trig = triggerGate(core, thresholds, env);
+  const trigBlocked = isValidSetup && !trig.ok;
+
+  const blocked = !!(htfBlocked || htfDirMismatch || chopBlocked || trigBlocked || secondaryBlocked);
+
+  const blockReason = blocked
+    ? (
+        htfBlocked ? (htfPerm.reason || "HTF gate") :
+        htfDirMismatch ? "HTF direction mismatch" :
+        chopBlocked ? (chop.reason || "Chop filter") :
+        trigBlocked ? (trig.reason || "Trigger not confirmed") :
+        `Secondary filter (score < ${secondaryMinScore})`
+      )
+    : null;
+
+  if (htfBlocked) issues.push(`HTF gate blocked on ${String(env?.SECONDARY_TIMEFRAME || "4h")}: ${htfPerm.reason || "REJECTED"}.`);
+  if (htfDirMismatch) issues.push(`HTF direction mismatch: HTF=${htfPerm.htf?.direction} vs LTF=${core.direction}.`);
+  if (chopBlocked) issues.push(`Chop filter blocked: ${chop.reason || "SIDEWAYS"}.`);
+  if (trigBlocked) issues.push(`Trigger not confirmed: ${trig.reason || "WAIT"}.`);
 
   if (!core.direction) {
     issues.push("No clear trend (EMA55 is not decisively above/below EMA200).");

@@ -1,5 +1,6 @@
 import { applyTP, applySL } from "./stateMachine.js";
 import { isWinOutcome } from "./outcomes.js";
+import { ENTRY_CONFIRM_MODE, ENTRY_CONFIRM_DWELL_MS } from "../config/constants.js";
 
 function limitConcurrency(n) {
   let active = 0;
@@ -72,7 +73,7 @@ function entryHitCardText(pos, price) {
   return [
     "CLOUD TREND ALERT",
     "────────────────────────────────",
-    `✅ ENTRY HIT — ${dot} ${dir}`,
+    `✅ ENTRY CONFIRMED — ${dot} ${dir}`,
     `🌕 Pair: ${sym}`,
     `⏱ Timeframe: ${tf}`,
     "",
@@ -110,14 +111,31 @@ export class Monitor {
 
     const results = await Promise.all(
       active.map((pos) => this.run(async () => {
-        if (!pos || pos.status === "CLOSED" || pos.status === "EXPIRED") return null;
+        if (!pos || pos.status === "CLOSED" || pos.status === "EXPIRED") return null;        let price = null;
 
-        let price = null;
+        // Prefer mark price (futures) with premiumIndex fallback.
+        // IMPORTANT: do NOT fallback to entryMid when price fetch fails.
         try {
-          const p = await this.rest.premiumIndex({ symbol: pos.symbol });
-          price = Number(p?.markPrice);
+          if (this.rest?.markPrice) {
+            try {
+              const p = await this.rest.markPrice({ symbol: pos.symbol });
+              price = Number(p?.markPrice ?? p?.price);
+            } catch {
+              const p = await this.rest.markPrice(pos.symbol);
+              price = Number(p?.markPrice ?? p?.price);
+            }
+          }
         } catch {
-          price = Number(pos?.levels?.entryMid);
+          // ignore
+        }
+
+        if (!Number.isFinite(price)) {
+          try {
+            const p = await this.rest.premiumIndex({ symbol: pos.symbol });
+            price = Number(p?.markPrice ?? p?.indexPrice ?? p?.price);
+          } catch {
+            // ignore
+          }
         }
 
         // --- ENTRY lifecycle: pending -> filled or expired ---
@@ -139,11 +157,45 @@ export class Monitor {
             return { pos, event: "EXPIRED", price };
           }
 
-          if (inEntryZone(pos, price)) {
-            pos.filledAt = nowMs;
-            pos.openedAt = pos.openedAt || nowMs;
-            pos.status = "RUNNING";
-            return { pos, event: "FILLED", price };
+          const zoneHit = inEntryZone(pos, price);
+
+          if (zoneHit) {
+            const mode = String(pos?.entryConfirmMode || ENTRY_CONFIRM_MODE).toUpperCase();
+            const dwellMs = Number.isFinite(Number(pos?.entryConfirmDwellMs))
+              ? Number(pos.entryConfirmDwellMs)
+              : ENTRY_CONFIRM_DWELL_MS;
+
+            // Step 1: Setup touched the zone -> ARM (persist state; no chat notify).
+            if (!pos.entryArmedAt) {
+              pos.entryArmedAt = nowMs;
+              pos.entryArmedPrice = Number(price);
+              pos.status = "PENDING_ENTRY";
+              return { pos, event: "ARMED", price };
+            }
+
+            // Require the price to persist inside the zone for a minimum dwell time (anti-wick).
+            if (dwellMs > 0 && (nowMs - Number(pos.entryArmedAt)) < dwellMs) {
+              pos.status = "PENDING_ENTRY";
+              return null;
+            }
+
+            // Step 2: Trigger confirmation (default MID_CROSS).
+            const mid = Number(pos?.levels?.entryMid);
+            const dir = String(pos?.direction || "LONG").toUpperCase() === "SHORT" ? "SHORT" : "LONG";
+
+            let triggerOk = true;
+            if (mode === "MID_CROSS") {
+              if (!Number.isFinite(mid) || !Number.isFinite(Number(price))) triggerOk = false;
+              else triggerOk = dir === "LONG" ? Number(price) >= mid : Number(price) <= mid;
+            }
+
+            if (triggerOk) {
+              pos.filledAt = nowMs;
+              pos.filledPrice = Number(price);
+              pos.openedAt = pos.openedAt || nowMs;
+              pos.status = "RUNNING";
+              return { pos, event: "FILLED", price };
+            }
           }
 
           pos.status = "PENDING_ENTRY";
@@ -151,6 +203,8 @@ export class Monitor {
         }
 
         // --- Active trade monitoring (only after FILLED) ---
+        if (!Number.isFinite(Number(price))) return null;
+
         const tp = applyTP(pos, price);
         if (tp.changed) return { pos, event: tp.event, price };
 

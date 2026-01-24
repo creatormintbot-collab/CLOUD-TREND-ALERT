@@ -1,56 +1,122 @@
-import { fmtPrice, fmtSignedInt, fmtScore } from "../../utils/format.js";
+import { fmtPrice } from "../../utils/format.js";
 
-export function entryCard(sig) {
-  const dirEmoji = sig.direction === "LONG" ? "🟢" : "🔴";
-  const p = sig.points || {};
-  const m = sig.macro || {};
+export function entryHitCard(pos, price) {
+  const dirEmoji = pos.direction === "LONG" ? "🟢" : "🔴";
   return [
     "CLOUD TREND ALERT",
     "━━━━━━━━━━━━━━━━━━",
-    `🚀 FUTURES SIGNAL — ${dirEmoji} ${sig.direction}`,
-    `🪙 Pair: ${sig.symbol}`,
-    `⏱ Timeframe: ${sig.tf}`,
+    `✅ ENTRY CONFIRMED — ${dirEmoji} ${pos.direction}`,
+    `🪙 Pair: ${pos.symbol}`,
+    `⏱ Timeframe: ${pos.tf}`,
+    "",
+    `🎯 Fill Price: ${fmtPrice(price)}`,
+    "",
+    "Monitoring TP/SL...",
+  ].join("\n");
+}
+
+export function entryCard(s) {
+  const dirRaw = String(s?.direction || s?.side || s?.signal || "LONG").toUpperCase();
+  const dir = dirRaw === "SHORT" ? "SHORT" : "LONG";
+  const dot = dir === "LONG" ? "🟢" : "🔴";
+
+  const sym = s?.symbol || s?.pair || "N/A";
+  const tf = s?.tf || s?.timeframe || "N/A";
+
+  const levels = s?.levels || {};
+  const entryLow = levels.entryLow ?? s?.entryLow ?? s?.entry?.low;
+  const entryHigh = levels.entryHigh ?? s?.entryHigh ?? s?.entry?.high;
+  const entryMid = levels.entryMid ?? s?.entryMid ?? s?.midEntry ?? s?.entry?.mid;
+
+  const sl = levels.sl ?? s?.sl ?? s?.stopLoss;
+
+  const tp1 = levels.tp1 ?? s?.tp1;
+  const tp2 = levels.tp2 ?? s?.tp2;
+  const tp3 = levels.tp3 ?? s?.tp3;
+
+  const score = Number.isFinite(Number(s?.score)) ? Number(s.score) : null;
+
+  const fmt = (v) => {
+    if (v === null || v === undefined) return "N/A";
+    const n = Number(v);
+    if (!Number.isFinite(n)) return String(v);
+    if (Math.abs(n) >= 1000) return n.toFixed(2);
+    if (Math.abs(n) >= 1) return n.toFixed(4);
+    return n.toFixed(4);
+  };
+
+  const scoreLine = score === null
+    ? "📊 Score: N/A"
+    : `📊 Score: ${Math.round(score)} / 100`;
+
+  // Prefer a prebuilt line if your scoring already formats emojis + points.
+  let factorsLine =
+    s?.scoreFactorsLine ||
+    s?.factorsLine ||
+    (typeof s?.scoreFactors === "string" ? s.scoreFactors : null) ||
+    null;
+
+  if (!factorsLine) {
+    const f = s?.factors || s?.scoreBreakdown || null;
+    if (Array.isArray(f)) {
+      factorsLine = f.map((x) => {
+        const name = x?.name || x?.label || x?.key;
+        const val = x?.score ?? x?.value ?? x?.points;
+        if (!name || val === undefined) return null;
+        const n = Number(val);
+        if (Number.isFinite(n)) return `${name} ${n >= 0 ? "+" : ""}${n}`;
+        return `${name} ${val}`;
+      }).filter(Boolean).join(" | ");
+    } else if (f && typeof f === "object") {
+      factorsLine = Object.entries(f).map(([k, v]) => {
+        const n = Number(v);
+        if (Number.isFinite(n)) return `${k} ${n >= 0 ? "+" : ""}${n}`;
+        return `${k} ${v}`;
+      }).join(" | ");
+    }
+  }
+
+  const macro = s?.macro || s?.macroContext || {};
+  const btc = macro?.btc ?? macro?.BTC ?? null;
+  const alts = macro?.alts ?? macro?.ALTS ?? null;
+  const bias = macro?.bias ?? macro?.BIAS ?? null;
+
+  const lines = [
+    "CLOUD TREND ALERT",
+    "────────────────────────────────",
+    `🚀 FUTURES SIGNAL — ${dot} ${dir}`,
+    `🌕 Pair: ${sym}`,
+    `⏱ Timeframe: ${tf}`,
     "",
     "🎯 Entry Zone:",
-    `${fmtPrice(sig.levels.entryLow)} – ${fmtPrice(sig.levels.entryHigh)}`,
+    `${fmt(entryLow)} – ${fmt(entryHigh)}`,
     "⚖️ Mid Entry:",
-    `${fmtPrice(sig.levels.entryMid)}`,
+    `${fmt(entryMid)}`,
     "",
     "🛑 Stop Loss:",
-    `${fmtPrice(sig.levels.sl)}`,
+    `${fmt(sl)}`,
     "",
     "🎯 Take Profit:",
-    `TP1: ${fmtPrice(sig.levels.tp1)} (25%)`,
-    `TP2: ${fmtPrice(sig.levels.tp2)} (50%)`,
-    `TP3: ${fmtPrice(sig.levels.tp3)} (100%)`,
+    `TP1: ${fmt(tp1)} (25%)`,
+    `TP2: ${fmt(tp2)} (50%)`,
+    `TP3: ${fmt(tp3)} (100%)`,
     "",
-    `📊 Score: ${fmtScore(sig.score)} / 100`,
-    "",
-    "📊 Score Factors:",
-    `📐 EMA ${fmtSignedInt(p.EMA)} | 🌊 Pullback ${fmtSignedInt(p.Pullback)} | 📊 RSI ${fmtSignedInt(p.RSI)} | 🧱 ADX ${fmtSignedInt(p.ADX)} | 🧨 Risk ${fmtSignedInt(p.Risk)} | 📉 MACD ${fmtSignedInt(p.MACD)} | 📏 SMA ${fmtSignedInt(p.SMA)} | 🌍 Macro ${fmtSignedInt(p.Macro)}${(p.Ichimoku != null ? ` | ☁️ Ichimoku ${fmtSignedInt(p.Ichimoku)}` : "")}`,
-    "",
-    "🌍 Macro Context:",
-    `₿ BTC: ${m.BTC_STATE || "NEUTRAL"} | 🪙 ALTS: ${m.ALT_STATE || "NEUTRAL"}`,
-    `⚡ Bias: ${m.BIAS || "NEUTRAL"}`,
-    ...(() => {
-      const bias =
-        sig?.ichimoku?.bias ||
-        sig?.htf?.ichimokuBias ||
-        sig?.ichimokuBias ||
-        null;
+    scoreLine,
+  ];
 
-      const liq =
-        sig?.liquidity?.status ||
-        sig?.liquidityStatus ||
-        sig?.meta?.liquidityStatus ||
-        null;
+  if (factorsLine) {
+    lines.push("", "📊 Score Factors:", String(factorsLine));
+  }
 
-      const out = [];
-      if (bias) out.push(`☁️ HTF (4H) Ichimoku: ${String(bias).toUpperCase()}`);
-      if (liq) out.push(`💧 Liquidity: ${String(liq).toUpperCase()}`);
-      return out;
-    })(),
-    "━━━━━━━━━━━━━━━━━━",
-    "⚠️ Not Financial Advice"
-  ].join("\n");
+  if (btc || alts || bias) {
+    lines.push(
+      "",
+      "🌍 Macro Context:",
+      `฿ BTC: ${btc ?? "N/A"} | 🌕 ALTS: ${alts ?? "N/A"}`,
+      `⚡ Bias: ${bias ?? "N/A"}`
+    );
+  }
+
+  lines.push("", "⚠️ Not Financial Advice");
+  return lines.join("\n");
 }

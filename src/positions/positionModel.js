@@ -1,4 +1,4 @@
-import { STATUS } from "../config/constants.js";
+import { STATUS, ENTRY_CONFIRM_MODE, ENTRY_CONFIRM_DWELL_MS } from "../config/constants.js";
 
 export function createPositionFromSignal(
   signal,
@@ -25,6 +25,17 @@ export function createPositionFromSignal(
     macro: signal.macro,
     points: signal.points,
     levels: signal.levels,
+
+    // 2-step entry confirmation (monitor-side)
+    entryArmedAt: null,
+    entryArmedPrice: null,
+    entryConfirmMode: signal?.entryConfirmMode || ENTRY_CONFIRM_MODE,
+    entryConfirmDwellMs: Number.isFinite(Number(signal?.entryConfirmDwellMs))
+      ? Number(signal.entryConfirmDwellMs)
+      : ENTRY_CONFIRM_DWELL_MS,
+
+    filledAt: null,
+    filledPrice: null,
 
     status: STATUS.ENTRY,
     closeOutcome: null,
