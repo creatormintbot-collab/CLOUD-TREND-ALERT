@@ -53,7 +53,7 @@ export class Pipeline {
   }
 
   async scanPair(symbol) {
-    const tfs = this._scanTimeframes().filter((tf) => tf !== this.env?.SECONDARY_TIMEFRAME);
+    const tfs = this._scanTimeframes();
     const results = [];
 
     for (const tf of tfs) {
@@ -90,7 +90,7 @@ export class Pipeline {
   }
 
   explainPair(symbol) {
-    const tfs = this._scanTimeframes().filter((tf) => tf !== this.env?.SECONDARY_TIMEFRAME);
+    const tfs = this._scanTimeframes();
     return tfs.map((tf) =>
       explainSignal({
         symbol,
