@@ -21,6 +21,50 @@ export class Pipeline {
     this.stateRepo = stateRepo;
     this.rotationRepo = rotationRepo;
     this.env = env;
+    this._warmupDone = new Set(); // scan warmup guard (avoid REST spam)
+  }
+
+  async _maybeWarmupKlines(symbols, tfs, reason = "scan") {
+    try {
+      if (!this.klines || typeof this.klines.getCandles !== "function" || typeof this.klines.backfill !== "function") return;
+
+      const minCandles = 220; // must satisfy ranker.fastScore + signalEngine candles requirement
+      const maxSyms = Math.max(6, Math.min(12, Number(this.env?.TOP10_PER_TF ?? 10)));
+
+      const symList = Array.from(new Set((symbols || [])
+        .map((s) => String(s || "").toUpperCase())
+        .filter(Boolean)))
+        .slice(0, maxSyms);
+
+      const tfList = Array.from(new Set((tfs || [])
+        .map((x) => String(x || "").trim().toLowerCase())
+        .filter(Boolean)));
+
+      for (const tf of tfList) {
+        const guardKey = `${reason}|${tf}`;
+        if (this._warmupDone?.has(guardKey)) continue;
+
+        const need = [];
+        for (const s of symList) {
+          const n = (this.klines.getCandles(s, tf) || []).length;
+          if (n < minCandles) need.push(s);
+        }
+
+        // Mark as attempted to avoid repeated backfills if scan is spammed
+        this._warmupDone?.add(guardKey);
+
+        if (!need.length) continue;
+
+        // Non-spam: one line per tf per reason
+        (this.env?.LOG_LEVEL === "debug" ? console.debug : console.info)(
+          `[SCAN] warmup_backfill ${reason} tf=${tf} need=${need.length}/${symList.length} min=${minCandles}`
+        );
+
+        await this.klines.backfill(need, [tf]);
+      }
+    } catch {
+      // ignore warmup errors (scan will still run on whatever cache exists)
+    }
   }
 
   _scanTimeframes() {
@@ -81,6 +125,10 @@ export class Pipeline {
     const tfs = this._scanTimeframes();
     const results = [];
 
+    // Warmup klines cache (REST backfill) if intraday candles are missing (prevents /scan from returning swing-only).
+    await this._maybeWarmupKlines([symbol], tfs, "scan_pair");
+
+
     for (const tf of tfs) {
       const r = evaluateSignal({
         symbol,
@@ -103,6 +151,8 @@ export class Pipeline {
   }
 
   async scanPairTf(symbol, tf) {
+    // Warmup klines cache if needed (keeps explain/evaluate consistent after restart).
+    await this._maybeWarmupKlines([symbol], [tf], "scan_pair_tf");
     const r = evaluateSignal({
       symbol,
       tf,
@@ -123,6 +173,10 @@ export class Pipeline {
     const all = this._scanTimeframes();
 
     const intradayTfs = all.filter((t) => !isSwingTf(t, this.env));
+
+    // Warmup klines cache for both playbooks (keeps intraday available for fallback on duplicate swing).
+    await this._maybeWarmupKlines([symbol], [...intradayTfs, swingTf], "scan_pair_dual");
+
     const resultsIntraday = [];
     for (const tf of intradayTfs) {
       const r = evaluateSignal({
@@ -169,9 +223,7 @@ export class Pipeline {
     // - If both playbooks align direction => send 1 card (prefer SWING) with confluence tag.
     // - If both exist but opposite direction => do NOT send two directions; prefer SWING only.
     if (topSwing && topIntraday) {
-      const sameDir = String(topSwing.direction) === String(topIntraday.direction);
-
-      if (sameDir) {
+      if (String(topSwing.direction) === String(topIntraday.direction)) {
         // Confluence (LOCK): keep secondary for fallback if SWING is duplicate.
         topSwing.confluence = "INTRADAY + SWING";
         topSwing.confluenceTfs = [topIntraday.tf, topSwing.tf];
@@ -182,9 +234,6 @@ export class Pipeline {
 
         return { primary: topSwing, secondary: topIntraday };
       }
-
-      // Same pair but opposite direction => do NOT send two directions (LOCK).
-      // Prefer SWING; keep no secondary (no alternate symbol available for scanPairDual).
       return { primary: topSwing, secondary: null };
     }
 
@@ -202,6 +251,12 @@ export class Pipeline {
     const intradayTfs = all.filter((t) => !isSwingTf(t, this.env));
 
     const topN = Number(this.env?.TOP10_PER_TF ?? 10);
+
+    // Warmup klines cache for top volume symbols to ensure intraday candidates exist (fastScore requires >=220 candles).
+    const warmRows = await this.topVolumeCached(Math.min(symbols.length || 0, Math.max(6, topN)));
+    const warmSymbols = (warmRows || []).map((r) => r.symbol).filter(Boolean);
+    await this._maybeWarmupKlines(warmSymbols.length ? warmSymbols : symbols, [...intradayTfs, swingTf], "scan_best_dual");
+
 
     const intradayCandidates = [];
     for (const tf of intradayTfs) {

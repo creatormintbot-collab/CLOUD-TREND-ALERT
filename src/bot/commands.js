@@ -914,91 +914,106 @@ export class Commands {
         }
       };
 
-      // Ensure required field is persisted (LOCK)
-      try {
-        if (res && typeof res === "object" && !res.playbook) res.playbook = inferPlaybook(res);
-        if (secondaryPick && typeof secondaryPick === "object" && secondaryPick.ok && !secondaryPick.playbook) {
-          secondaryPick.playbook = inferPlaybook(secondaryPick);
+      const ensurePlaybook = (sig) => {
+        try {
+          if (sig && typeof sig === "object" && !sig.playbook) sig.playbook = inferPlaybook(sig);
+        } catch {}
+      };
+
+      const applyGuardrails = () => {
+        let onlyOne = false;
+        try {
+          if (secondaryPick && secondaryPick.ok) {
+            const pSym0 = normSym(res?.symbol);
+            const sSym0 = normSym(secondaryPick?.symbol);
+            const pDir0 = normDir(res?.direction);
+            const sDir0 = normDir(secondaryPick?.direction);
+
+            const pPb0 = String(res?.playbook || inferPlaybook(res)).toUpperCase();
+            const sPb0 = String(secondaryPick?.playbook || inferPlaybook(secondaryPick)).toUpperCase();
+
+            scanLog("candidates", {
+              primary: { symbol: pSym0, tf: String(res?.tf || ""), dir: pDir0, playbook: pPb0, score: Math.round(res?.score || 0) },
+              secondary: { symbol: sSym0, tf: String(secondaryPick?.tf || ""), dir: sDir0, playbook: sPb0, score: Math.round(secondaryPick?.score || 0) }
+            });
+
+            if (pSym0 && sSym0 && pSym0 === sSym0) {
+              onlyOne = true; // same pair => max 1 card (LOCK)
+              const isSwingP = pPb0 === "SWING";
+              const isSwingS = sPb0 === "SWING";
+
+              // Prefer Swing (LOCK). Keep the other as fallback if Swing is duplicate.
+              if (!isSwingP && isSwingS) {
+                const tmp = res;
+                res = secondaryPick;
+                secondaryPick = tmp;
+              }
+
+              const pSym = normSym(res?.symbol);
+              const sSym = normSym(secondaryPick?.symbol);
+              const pDir = normDir(res?.direction);
+              const sDir = normDir(secondaryPick?.direction);
+
+              const intraTf = String(secondaryPick?.tf || "");
+              const swingTf = String(res?.tf || "");
+
+              if (pSym && sSym && pSym === sSym && pDir && sDir && pDir === sDir) {
+                // Confluence: same pair + same direction across playbooks
+                res.confluence = "INTRADAY + SWING";
+                res.confluenceTfs = [intraTf, swingTf].filter(Boolean);
+                secondaryPick.confluence = "INTRADAY + SWING";
+                secondaryPick.confluenceTfs = [intraTf, swingTf].filter(Boolean);
+
+                scanLog("guardrail_confluence", { symbol: pSym, direction: pDir, prefer: "SWING" });
+              } else {
+                // Same pair but opposite direction => never send two directions (LOCK).
+                scanLog("guardrail_same_pair_opposite_dir", { symbol: pSym, primaryDir: pDir, secondaryDir: sDir, prefer: "SWING" });
+              }
+            }
+          } else if (res) {
+            scanLog("candidates", {
+              primary: { symbol: normSym(res?.symbol), tf: String(res?.tf || ""), dir: normDir(res?.direction), playbook: String(res?.playbook || inferPlaybook(res)).toUpperCase(), score: Math.round(res?.score || 0) }
+            });
+          }
+        } catch {}
+        return onlyOne;
+      };
+
+      const findActiveDup = (sig) => {
+        if (!sig) return null;
+        try {
+          return (typeof this.positionsRepo.findActiveBySymbolTf === "function"
+            ? this.positionsRepo.findActiveBySymbolTf(sig.symbol, sig.tf)
+            : null) ||
+            (Array.isArray(this.positionsRepo.listActive?.())
+              ? this.positionsRepo.listActive().find((p) =>
+                  p &&
+                  p.status !== "CLOSED" &&
+                  p.status !== "EXPIRED" &&
+                  String(p.symbol || "").toUpperCase() === String(sig.symbol || "").toUpperCase() &&
+                  String(p.tf || "").toLowerCase() === String(sig.tf || "").toLowerCase()
+                )
+              : null);
+        } catch {
+          return null;
         }
-      } catch {}
+      };
+
+      // Ensure required field is persisted (LOCK)
+      ensurePlaybook(res);
+      ensurePlaybook(secondaryPick);
 
       // Guardrails + confluence shaping (LOCK)
-      let onlyOneCard = false;
-      try {
-        if (secondaryPick && secondaryPick.ok) {
-          const pSym0 = normSym(res?.symbol);
-          const sSym0 = normSym(secondaryPick?.symbol);
-          const pDir0 = normDir(res?.direction);
-          const sDir0 = normDir(secondaryPick?.direction);
-
-          const pPb0 = String(res?.playbook || inferPlaybook(res)).toUpperCase();
-          const sPb0 = String(secondaryPick?.playbook || inferPlaybook(secondaryPick)).toUpperCase();
-
-          scanLog("candidates", {
-            primary: { symbol: pSym0, tf: String(res?.tf || ""), dir: pDir0, playbook: pPb0, score: Math.round(res?.score || 0) },
-            secondary: { symbol: sSym0, tf: String(secondaryPick?.tf || ""), dir: sDir0, playbook: sPb0, score: Math.round(secondaryPick?.score || 0) }
-          });
-
-          if (pSym0 && sSym0 && pSym0 === sSym0) {
-            onlyOneCard = true; // same pair => max 1 card (LOCK)
-            const isSwingP = pPb0 === "SWING";
-            const isSwingS = sPb0 === "SWING";
-
-            // Prefer Swing (LOCK). Keep the other as fallback if Swing is duplicate.
-            if (!isSwingP && isSwingS) {
-              const tmp = res;
-              res = secondaryPick;
-              secondaryPick = tmp;
-            }
-
-            const pSym = normSym(res?.symbol);
-            const sSym = normSym(secondaryPick?.symbol);
-            const pDir = normDir(res?.direction);
-            const sDir = normDir(secondaryPick?.direction);
-
-            const intraTf = String(secondaryPick?.tf || "");
-            const swingTf = String(res?.tf || "");
-
-            if (pSym && sSym && pSym === sSym && pDir && sDir && pDir === sDir) {
-              // Confluence: same pair + same direction across playbooks
-              res.confluence = "INTRADAY + SWING";
-              res.confluenceTfs = [intraTf, swingTf].filter(Boolean);
-              secondaryPick.confluence = "INTRADAY + SWING";
-              secondaryPick.confluenceTfs = [intraTf, swingTf].filter(Boolean);
-
-              scanLog("guardrail_confluence", { symbol: pSym, direction: pDir, prefer: "SWING" });
-            } else {
-              // Same pair but opposite direction => never send two directions (LOCK).
-              scanLog("guardrail_same_pair_opposite_dir", { symbol: pSym, primaryDir: pDir, secondaryDir: sDir, prefer: "SWING" });
-            }
-          }
-        } else if (res) {
-          scanLog("candidates", {
-            primary: { symbol: normSym(res?.symbol), tf: String(res?.tf || ""), dir: normDir(res?.direction), playbook: String(res?.playbook || inferPlaybook(res)).toUpperCase(), score: Math.round(res?.score || 0) }
-          });
-        }
-      } catch {}
+      let onlyOneCard = applyGuardrails();
 
       let primarySent = false;
       let secondarySent = false;
       let primaryDuplicatePos = null;
+      let secondaryDuplicatePos = null;
 
       // Prevent duplicate active signals (same Pair + Timeframe) — primary pick
       try {
-        const existing =
-          (typeof this.positionsRepo.findActiveBySymbolTf === "function"
-            ? this.positionsRepo.findActiveBySymbolTf(res.symbol, res.tf)
-            : null) ||
-          (Array.isArray(this.positionsRepo.listActive?.())
-            ? this.positionsRepo.listActive().find((p) =>
-                p &&
-                p.status !== "CLOSED" &&
-                p.status !== "EXPIRED" &&
-                String(p.symbol || "").toUpperCase() === String(res.symbol || "").toUpperCase() &&
-                String(p.tf || "").toLowerCase() === String(res.tf || "").toLowerCase()
-              )
-            : null);
-
+        const existing = findActiveDup(res);
         if (existing) {
           primaryDuplicatePos = existing;
 
@@ -1012,6 +1027,36 @@ export class Commands {
         }
       } catch {}
 
+      // If primary is duplicate in rotation-mode /scan, try fallback (LOCK: never stop early)
+      if (primaryDuplicatePos && rotationMode) {
+        try {
+          secondaryDuplicatePos = secondaryPick ? findActiveDup(secondaryPick) : null;
+          if (!secondaryPick || secondaryDuplicatePos) {
+            const exclude = [res?.symbol, secondaryPick?.symbol].filter(Boolean);
+            scanLog("fallback_rescan_start", { exclude });
+            const dual = await this.pipeline.scanBestDual({ excludeSymbols: exclude });
+            if (dual?.primary) {
+              res = dual.primary;
+              secondaryPick = dual.secondary || null;
+              ensurePlaybook(res);
+              ensurePlaybook(secondaryPick);
+              onlyOneCard = applyGuardrails();
+              primaryDuplicatePos = findActiveDup(res);
+              secondaryDuplicatePos = secondaryPick ? findActiveDup(secondaryPick) : null;
+              scanLog("fallback_rescan_result", {
+                primary: { symbol: normSym(res?.symbol), tf: String(res?.tf || ""), dir: normDir(res?.direction) },
+                secondary: secondaryPick ? { symbol: normSym(secondaryPick?.symbol), tf: String(secondaryPick?.tf || ""), dir: normDir(secondaryPick?.direction) } : null
+              });
+            } else {
+              scanLog("fallback_rescan_none", { exclude });
+            }
+          } else {
+            scanLog("fallback_secondary_ok", { symbol: normSym(secondaryPick?.symbol), tf: String(secondaryPick?.tf || "") });
+          }
+        } catch (e) {
+          scanLog("fallback_rescan_error", { err: String(e) });
+        }
+      }
 
       if (primaryDuplicatePos) {
         scanLog("primary_blocked_duplicate", {
