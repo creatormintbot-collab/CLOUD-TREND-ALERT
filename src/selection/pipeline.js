@@ -244,8 +244,17 @@ export class Pipeline {
 
   // /scan default (LOCKED): find best INTRADAY + best SWING across universe.
   // Output ideal: max 2 signals (Top 1 Intraday + Top 1 Swing), with guardrails.
-  async scanBestDual() {
-    const symbols = (this.universe.symbolsForScan?.() || this.universe.symbols?.() || []);
+  async scanBestDual(opts = null) {
+    // Optional exclude list (used by /scan fallback rescan). Backward compatible.
+    let excludeSymbols = [];
+    if (Array.isArray(opts)) excludeSymbols = opts;
+    else if (opts && typeof opts === "object") excludeSymbols = opts.excludeSymbols || opts.exclude || [];
+    const excludeSet = new Set((excludeSymbols || []).map((s) => String(s || "").toUpperCase()).filter(Boolean));
+
+    const symbolsAll = (this.universe.symbolsForScan?.() || this.universe.symbols?.() || []);
+    const symbols = excludeSet.size
+      ? symbolsAll.filter((s) => !excludeSet.has(String(s || "").toUpperCase()))
+      : symbolsAll;
     const all = this._scanTimeframes();
     const swingTf = String(this.env?.SECONDARY_TIMEFRAME || "4h");
     const intradayTfs = all.filter((t) => !isSwingTf(t, this.env));
@@ -276,6 +285,34 @@ export class Pipeline {
           isAuto: false
         });
         if (r?.ok) intradayCandidates.push(r);
+      }
+    }
+
+
+    // Fallback: if intradayCandidates is empty (common after cold start or cache gaps),
+    // attempt a bounded scan on warmed/top-volume symbols without relying on fastScore.
+    if (!intradayCandidates.length && intradayTfs.length) {
+      const seedSyms = (warmSymbols && warmSymbols.length) ? warmSymbols : symbols.slice(0, Math.max(6, topN));
+      const seen = new Set();
+      for (const tf of intradayTfs) {
+        for (const s of seedSyms.slice(0, Math.min(seedSyms.length, Math.max(6, topN)))) {
+          const key = `${String(s).toUpperCase()}|${String(tf).toLowerCase()}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+
+          const r = evaluateSignal({
+            symbol: s,
+            tf,
+            klines: this.klines,
+            thresholds: this.thresholds,
+            env: this.env,
+            isAuto: false
+          });
+          if (r?.ok) intradayCandidates.push(r);
+        }
+      }
+      if (this.env?.LOG_LEVEL === "debug" && !intradayCandidates.length) {
+        console.debug(`[SCAN] intraday_empty fallback_scanned syms=${seedSyms.length} tfs=${intradayTfs.join(",")}`);
       }
     }
 
