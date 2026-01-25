@@ -169,14 +169,22 @@ export class Pipeline {
     // - If both playbooks align direction => send 1 card (prefer SWING) with confluence tag.
     // - If both exist but opposite direction => do NOT send two directions; prefer SWING only.
     if (topSwing && topIntraday) {
-      if (String(topSwing.direction) === String(topIntraday.direction)) {
-        topSwing.confluence = "INTRADAY+SWING";
+      const sameDir = String(topSwing.direction) === String(topIntraday.direction);
+
+      if (sameDir) {
+        // Confluence (LOCK): keep secondary for fallback if SWING is duplicate.
+        topSwing.confluence = "INTRADAY + SWING";
         topSwing.confluenceTfs = [topIntraday.tf, topSwing.tf];
-        // Keep intraday as secondary for fallback when Swing is duplicate (LOCK).
-        topIntraday.confluence = "INTRADAY+SWING";
+
+        // Mirror on intraday too (helps fallback UX if primary is blocked)
+        topIntraday.confluence = "INTRADAY + SWING";
         topIntraday.confluenceTfs = [topIntraday.tf, topSwing.tf];
+
         return { primary: topSwing, secondary: topIntraday };
       }
+
+      // Same pair but opposite direction => do NOT send two directions (LOCK).
+      // Prefer SWING; keep no secondary (no alternate symbol available for scanPairDual).
       return { primary: topSwing, secondary: null };
     }
 
@@ -255,11 +263,14 @@ export class Pipeline {
     // Guardrail: if same pair
     if (String(topSwing.symbol) === String(topIntraday.symbol)) {
       if (String(topSwing.direction) === String(topIntraday.direction)) {
-        topSwing.confluence = "INTRADAY+SWING";
+        // Confluence (LOCK): keep secondary for fallback if SWING is duplicate.
+        topSwing.confluence = "INTRADAY + SWING";
         topSwing.confluenceTfs = [topIntraday.tf, topSwing.tf];
-        // Keep intraday as secondary for fallback when Swing is duplicate (LOCK).
-        topIntraday.confluence = "INTRADAY+SWING";
+
+        // Mirror on intraday too (helps fallback UX if primary is blocked)
+        topIntraday.confluence = "INTRADAY + SWING";
         topIntraday.confluenceTfs = [topIntraday.tf, topSwing.tf];
+
         return { primary: topSwing, secondary: topIntraday };
       }
 

@@ -868,7 +868,6 @@ export class Commands {
       if (out.kind !== "OK") return;
 
       let res = out.result;
-
       if (!res || !res.ok || res.score < 70 || res.scoreLabel === "NO SIGNAL") {
         await this.signalsRepo.logScanNoSignal({
           chatId,
@@ -971,8 +970,6 @@ export class Commands {
             } else {
               // Same pair but opposite direction => never send two directions (LOCK).
               scanLog("guardrail_same_pair_opposite_dir", { symbol: pSym, primaryDir: pDir, secondaryDir: sDir, prefer: "SWING" });
-              // LOCK: never fallback to opposite-direction candidate on the same pair.
-              secondaryPick = null;
             }
           }
         } else if (res) {
@@ -1004,6 +1001,12 @@ export class Commands {
 
         if (existing) {
           primaryDuplicatePos = existing;
+
+          await this.signalsRepo.logScanThrottled({
+            chatId,
+            query: { symbol: symbolUsed || null, tf: res.tf || null, raw: raw || "" },
+            meta: { reason: "DUPLICATE_ACTIVE" }
+          });
 
           scanLog("duplicate_primary", { symbol: normSym(res.symbol), tf: String(res.tf || ""), playbook: String(res.playbook || "") });
         }
@@ -1078,6 +1081,11 @@ export class Commands {
               : null);
 
           if (existing) {
+            await this.signalsRepo.logScanThrottled({
+              chatId,
+              query: { symbol: secondaryPick.symbol || null, tf: secondaryPick.tf || null, raw: raw || "" },
+              meta: { reason: "DUPLICATE_ACTIVE_SECONDARY" }
+            });
             scanLog("duplicate_secondary", { symbol: normSym(secondaryPick.symbol), tf: String(secondaryPick.tf || ""), playbook: String(secondaryPick.playbook || "") });
           } else {
             // chart FIRST (ENTRY only)
@@ -1126,12 +1134,6 @@ export class Commands {
 
       // If primary was blocked by duplicate and no fallback was sent, show Duplicate Prevented (LOCK)
       if (primaryDuplicatePos && !primarySent && !secondarySent) {
-        await this.signalsRepo.logScanThrottled({
-          chatId,
-          query: { symbol: symbolUsed || null, tf: res?.tf || null, raw: raw || "" },
-          meta: { reason: "DUPLICATE_ACTIVE_NO_FALLBACK" }
-        });
-
         await this.sender.sendText(chatId, formatDuplicateNotice({
           symbol: res.symbol,
           tf: res.tf,
