@@ -446,6 +446,9 @@ export function evaluateSignal({ symbol, tf, klines, thresholds, env = {}, isAut
   const core = computeCore({ symbol, tf, klines, thresholds, env, isAuto });
   if (!core.ok) return { ok: false };
 
+  const playbook = playbookForTf(tf, env);
+  const useIchimoku = playbook === "SWING";
+
   // HTF permission layer (HARD GATE): LTF must not publish when HTF rejects.
   const htfPerm = htfPermissionGate({ symbol, tf, klines, thresholds, env, isAuto });
   if (!htfPerm.ok) return { ok: false };
@@ -479,9 +482,11 @@ export function evaluateSignal({ symbol, tf, klines, thresholds, env = {}, isAut
   // Ichimoku compass (LOCKED):
   // - Direction mismatch => block
   // - AUTO rejects NEUTRAL/UNKNOWN
-  if (core.ichimoku?.bias === "BULL" && core.direction && core.direction !== "LONG") return { ok: false };
-  if (core.ichimoku?.bias === "BEAR" && core.direction && core.direction !== "SHORT") return { ok: false };
-  if (isAuto && (core.ichimoku?.bias === "NEUTRAL" || core.ichimoku?.bias === "UNKNOWN")) return { ok: false };
+  if (useIchimoku) {
+    if (core.ichimoku?.bias === "BULL" && core.direction && core.direction !== "LONG") return { ok: false };
+    if (core.ichimoku?.bias === "BEAR" && core.direction && core.direction !== "SHORT") return { ok: false };
+    if (isAuto && (core.ichimoku?.bias === "NEUTRAL" || core.ichimoku?.bias === "UNKNOWN")) return { ok: false };
+  }
 
   if (!core.direction) return { ok: false };
 
@@ -501,7 +506,6 @@ export function evaluateSignal({ symbol, tf, klines, thresholds, env = {}, isAut
 
   const entryMid = core.close;
 
-  const playbook = playbookForTf(tf, env);
   const tpRMults = playbook === "SWING" ? [1.0, 1.5, 2.0] : [1.0, 1.4, 1.8];
 
   const lv = levelsFromATR({
@@ -516,7 +520,7 @@ export function evaluateSignal({ symbol, tf, klines, thresholds, env = {}, isAut
   const scoreRaw = Number(core.fin.total || 0);
   let ichimokuPts = 0;
 
-  if (!isAuto) {
+  if (!isAuto && useIchimoku) {
     if (core.ichimoku?.bias === "BULL" || core.ichimoku?.bias === "BEAR") ichimokuPts = 4;
     else if (core.ichimoku?.bias === "NEUTRAL" || core.ichimoku?.bias === "UNKNOWN") ichimokuPts = -12;
   }
@@ -586,6 +590,9 @@ export function explainSignal({ symbol, tf, klines, thresholds, env = {}, isAuto
     };
   }
 
+  const playbook = playbookForTf(tf, env);
+  const useIchimoku = playbook === "SWING";
+
   const softMinAuto = Number(env?.CTA_SOFT_MIN_SCORE_AUTO ?? thresholds?.CTA_SOFT_MIN_SCORE_AUTO ?? thresholds?.AUTO_MIN_SCORE ?? 85);
   const softMinScan = Number(env?.CTA_SOFT_MIN_SCORE_SCAN ?? thresholds?.CTA_SOFT_MIN_SCORE_SCAN ?? 75);
   const softMinScore = isAuto ? softMinAuto : softMinScan;
@@ -595,7 +602,7 @@ export function explainSignal({ symbol, tf, klines, thresholds, env = {}, isAuto
   const scoreRaw = Number(core.fin.total || 0);
   let ichimokuPts = 0;
 
-  if (!isAuto) {
+  if (!isAuto && useIchimoku) {
     if (core.ichimoku?.bias === "BULL" || core.ichimoku?.bias === "BEAR") ichimokuPts = 4;
     else if (core.ichimoku?.bias === "NEUTRAL" || core.ichimoku?.bias === "UNKNOWN") ichimokuPts = -12;
   }
@@ -604,7 +611,7 @@ export function explainSignal({ symbol, tf, klines, thresholds, env = {}, isAuto
   const scoreLabel = scoreLabelFromScore(score);
 
   const ichiBias = core.ichimoku?.bias || "UNKNOWN";
-  const ichiOk =
+  const ichiOk = !useIchimoku ||
     (ichiBias === "BULL" && core.direction === "LONG") ||
     (ichiBias === "BEAR" && core.direction === "SHORT") ||
     (!isAuto && (ichiBias === "NEUTRAL" || ichiBias === "UNKNOWN"));
@@ -670,21 +677,23 @@ export function explainSignal({ symbol, tf, klines, thresholds, env = {}, isAuto
     issues.push("No clear trend (EMA55 is not decisively above/below EMA200).");
   } else {
     // Ichimoku compass notes (LOCKED)
-    if (ichiBias === "UNKNOWN") {
-      issues.push(`Ichimoku compass not ready on ${core.ichimoku?.tf || (env?.SECONDARY_TIMEFRAME || "4h")} (${isAuto ? "AUTO blocked" : "score penalized"}).`);
-    } else if (ichiBias === "NEUTRAL") {
-      issues.push(`Ichimoku compass is NEUTRAL on ${core.ichimoku?.tf || (env?.SECONDARY_TIMEFRAME || "4h")} (${isAuto ? "AUTO blocked" : "score penalized"}).`);
-    } else if (ichiBias === "BULL" && core.direction && core.direction !== "LONG") {
-      issues.push(`Ichimoku bias is BULL (4H) but local direction is ${core.direction}.`);
-    } else if (ichiBias === "BEAR" && core.direction && core.direction !== "SHORT") {
-      issues.push(`Ichimoku bias is BEAR (4H) but local direction is ${core.direction}.`);
-    }
+    if (useIchimoku) {
+      if (ichiBias === "UNKNOWN") {
+        issues.push(`Ichimoku compass not ready on ${core.ichimoku?.tf || (env?.SECONDARY_TIMEFRAME || "4h")} (${isAuto ? "AUTO blocked" : "score penalized"}).`);
+      } else if (ichiBias === "NEUTRAL") {
+        issues.push(`Ichimoku compass is NEUTRAL on ${core.ichimoku?.tf || (env?.SECONDARY_TIMEFRAME || "4h")} (${isAuto ? "AUTO blocked" : "score penalized"}).`);
+      } else if (ichiBias === "BULL" && core.direction && core.direction !== "LONG") {
+        issues.push(`Ichimoku bias is BULL (4H) but local direction is ${core.direction}.`);
+      } else if (ichiBias === "BEAR" && core.direction && core.direction !== "SHORT") {
+        issues.push(`Ichimoku bias is BEAR (4H) but local direction is ${core.direction}.`);
+      }
 
-    if (!ichiOk) {
-      if (isAuto && (ichiBias === "NEUTRAL" || ichiBias === "UNKNOWN")) {
-        issues.push("AUTO blocked by Ichimoku: bias must be BULL/BEAR (not NEUTRAL/UNKNOWN).");
-      } else if (core.direction) {
-        issues.push("Blocked by Ichimoku direction lock.");
+      if (!ichiOk) {
+        if (isAuto && (ichiBias === "NEUTRAL" || ichiBias === "UNKNOWN")) {
+          issues.push("AUTO blocked by Ichimoku: bias must be BULL/BEAR (not NEUTRAL/UNKNOWN).");
+        } else if (core.direction) {
+          issues.push("Blocked by Ichimoku direction lock.");
+        }
       }
     }
 

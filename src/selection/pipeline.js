@@ -236,7 +236,7 @@ async scanPairDual(symbol) {
       const scored = [];
 
       for (const sym of symbols) {
-        const fast = this.ranker.fastScore(sym, tf, this.klines, this.thresholds);
+        const fast = this.ranker.fastScore(sym, tf, this.thresholds);
         if (fast <= 0) continue;
         scored.push({ symbol: sym, tf, fast });
       }
@@ -298,7 +298,7 @@ async scanBestIntraday(opts = {}) {
   for (const tf of intradayTfs) {
     const scored = [];
     for (const sym of symbols) {
-      const fast = this.ranker.fastScore(sym, tf, this.klines, this.thresholds);
+      const fast = this.ranker.fastScore(sym, tf, this.thresholds);
       if (fast <= 0) continue;
       scored.push({ symbol: sym, tf, fast });
     }

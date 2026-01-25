@@ -999,6 +999,45 @@ export class Commands {
         }
       };
 
+      let samePairOpposite = false;
+      try {
+        if (secondaryPick && res) {
+          const pSym = normSym(res?.symbol);
+          const sSym = normSym(secondaryPick?.symbol);
+          const pDir = normDir(res?.direction);
+          const sDir = normDir(secondaryPick?.direction);
+          if (pSym && sSym && pSym === sSym && pDir && sDir && pDir !== sDir) samePairOpposite = true;
+        }
+      } catch {}
+
+      if (!rotationMode && samePairOpposite) {
+        secondaryPick = null;
+      }
+
+      // secondary_fill_intraday: fill missing/invalid intraday candidate in rotation mode
+      if (rotationMode && (!secondaryPick || samePairOpposite) && typeof this.pipeline.scanBestIntraday === "function") {
+        try {
+          const primarySym = res?.symbol;
+          const intr = await this.pipeline.scanBestIntraday({ excludeSymbols: [primarySym].filter(Boolean) });
+          const dup = intr?.ok ? findActiveDup(intr) : null;
+          const ok = !!(intr?.ok && !dup);
+
+          scanLog("intraday_fill_attempt", {
+            ok,
+            symbol: intr?.symbol || null,
+            tf: intr?.tf || null,
+            dir: normDir(intr?.direction || intr?.dir),
+            score: (intr?.score != null ? Math.round(intr.score) : null)
+          });
+
+          if (ok) {
+            secondaryPick = intr;
+          } else if (samePairOpposite) {
+            secondaryPick = null;
+          }
+        } catch {}
+      }
+
       // Ensure required field is persisted (LOCK)
       ensurePlaybook(res);
       ensurePlaybook(secondaryPick);
