@@ -216,6 +216,17 @@ function formatStatusCard({
   entryHitRunning = 0,
   pendingEntry = 0,
   carriedRunning = 0,
+  // Live breakdown by playbook (optional)
+  intradayRunning = 0,
+  intradayEntryHitRunning = 0,
+  intradayPendingEntry = 0,
+  intradayCarriedRunning = 0,
+  intradayList = "",
+  swingRunning = 0,
+  swingEntryHitRunning = 0,
+  swingPendingEntry = 0,
+  swingCarriedRunning = 0,
+  swingList = "",
   closedToday = 0,
   tp1Today = 0,
   tp2Today = 0,
@@ -244,6 +255,12 @@ function formatStatusCard({
     `• Entry Hit & Running: ${entryHitRunning}`,
     `• Pending Entry: ${pendingEntry}`,
     `• Carried From Previous Days: ${carriedRunning}`,
+    "",
+    "🧩 Live Positions by Mode (Now)",
+    `• Intraday: ${intradayRunning} running | ${intradayEntryHitRunning} entry-hit | ${intradayPendingEntry} pending | ${intradayCarriedRunning} carried`,
+    `• Swing: ${swingRunning} running | ${swingEntryHitRunning} entry-hit | ${swingPendingEntry} pending | ${swingCarriedRunning} carried`,
+    `• Intraday Active: ${intradayList || "-"}`,
+    `• Swing Active: ${swingList || "-"}`,
     "",
     "🎯 Results (Closed Today)",
     `• Closed Trades: ${closedToday}`,
@@ -419,6 +436,56 @@ export class Commands {
       const pendingEntry = activeList.filter((p) => isActivePos(p) && entryHitTs(p) === 0).length;
       const carriedRunning = activeList.filter((p) => isActivePos(p) && Number(p?.createdAt || 0) > 0 && Number(p.createdAt) < startMs).length;
 
+      // Live breakdown by playbook (INTRADAY vs SWING)
+      const inferPlaybook = (p) => {
+        const pb = String(p?.playbook || "").toUpperCase();
+        if (pb === "INTRADAY" || pb === "SWING") return pb;
+        const tf = String(p?.tf || "").toLowerCase();
+        const sec = String(this.env?.SECONDARY_TIMEFRAME || "4h").toLowerCase();
+        return tf === sec ? "SWING" : "INTRADAY";
+      };
+
+      const normalizeDir = (p) => {
+        const raw =
+          p?.direction ??
+          p?.side ??
+          p?.signal?.direction ??
+          p?.signal?.side ??
+          p?.bias ??
+          "";
+        const s = String(raw || "").toUpperCase();
+        if (!s) return "";
+        if (s.startsWith("LONG") || s === "L") return "LONG";
+        if (s.startsWith("SHORT") || s === "S") return "SHORT";
+        return s;
+      };
+
+      const formatPosShort = (p) => {
+        const sym = String(p?.symbol || "").toUpperCase() || "N/A";
+        const tf = String(p?.tf || "").toLowerCase() || "N/A";
+        const dir = normalizeDir(p);
+        const st = entryHitTs(p) > 0 ? "RUN" : "PEND";
+        return dir ? `${sym} ${dir} (${tf}) ${st}` : `${sym} (${tf}) ${st}`;
+      };
+
+      const intradayPositions = activeList.filter((p) => inferPlaybook(p) === "INTRADAY");
+      const swingPositions = activeList.filter((p) => inferPlaybook(p) === "SWING");
+
+      const intradayRunning = intradayPositions.length;
+      const swingRunning = swingPositions.length;
+
+      const intradayEntryHitRunning = intradayPositions.filter((p) => entryHitTs(p) > 0).length;
+      const swingEntryHitRunning = swingPositions.filter((p) => entryHitTs(p) > 0).length;
+
+      const intradayPendingEntry = intradayPositions.filter((p) => entryHitTs(p) === 0).length;
+      const swingPendingEntry = swingPositions.filter((p) => entryHitTs(p) === 0).length;
+
+      const intradayCarriedRunning = intradayPositions.filter((p) => Number(p?.createdAt || 0) > 0 && Number(p.createdAt) < startMs).length;
+      const swingCarriedRunning = swingPositions.filter((p) => Number(p?.createdAt || 0) > 0 && Number(p.createdAt) < startMs).length;
+
+      const intradayList = intradayPositions.slice(0, 6).map(formatPosShort).join(", ");
+      const swingList = swingPositions.slice(0, 6).map(formatPosShort).join(", ");
+
       const closedTodayList = (Array.isArray(all) ? all : [])
         .filter(isClosedPos)
         .filter((p) => sameUtcDay(Number(p?.closedAt || 0), dateKey));
@@ -455,6 +522,16 @@ export class Commands {
           entryHitRunning,
           pendingEntry,
           carriedRunning,
+          intradayRunning,
+          intradayEntryHitRunning,
+          intradayPendingEntry,
+          intradayCarriedRunning,
+          intradayList,
+          swingRunning,
+          swingEntryHitRunning,
+          swingPendingEntry,
+          swingCarriedRunning,
+          swingList,
           closedToday,
           tp1Today,
           tp2Today,
@@ -659,13 +736,17 @@ export class Commands {
 
       const startedAt = Date.now();
       let out = null;
+      let secondaryRes = null;
+
 
       // Rotation mode keeps Progress UI (single edited message).
       if (rotationMode) {
         out = await this.progressUi.run({ chatId, userId }, async () => {
-          const { symbol, res } = await this.pipeline.scanOneBest(chatId);
-          symbolUsed = symbol;
-          return res;
+          const dual = await this.pipeline.scanBestDual();
+          const primary = dual?.primary || null;
+          secondaryRes = dual?.secondary || null;
+          symbolUsed = primary?.symbol || null;
+          return primary;
         });
       } else {
         // Targeted /scan (pair / pair+tf) skips Progress UI to avoid double messages
@@ -675,7 +756,11 @@ export class Commands {
 
           if (symbolArg && !tfArg) {
             symbolUsed = symbolArg;
-            res = await this.pipeline.scanPair(symbolArg);
+
+            // LOCKED: /scan (pair only) returns best INTRADAY + SWING (4h), max 2 cards.
+            const dual = await this.pipeline.scanPairDual(symbolArg);
+            res = dual?.primary || null;
+            secondaryRes = dual?.secondary || null;
           } else {
             symbolUsed = symbolArg;
             res = await this.pipeline.scanPairTf(symbolArg, tfArg);
@@ -728,7 +813,7 @@ export class Commands {
                 symbol: symbolUsed,
                 diags,
                 tfExplicit: null,
-                rotationNote: rotationMode
+                rotationNote: false
               }));
             }
           }
@@ -799,7 +884,7 @@ export class Commands {
               symbol: symbolUsed,
               diags,
               tfExplicit: null,
-              rotationNote: rotationMode
+              rotationNote: false
             }));
           }
         } catch {}
@@ -879,6 +964,74 @@ export class Commands {
 
       this.positionsRepo.upsert(pos);
       await this.positionsRepo.flush();
+
+      // Optional secondary card for /scan default (LOCKED): Top 1 Swing + Top 1 Intraday
+      if (secondaryRes && secondaryRes.ok) {
+        // Prevent duplicate active signals (same Pair + Timeframe)
+        try {
+          const existing =
+            (typeof this.positionsRepo.findActiveBySymbolTf === "function"
+              ? this.positionsRepo.findActiveBySymbolTf(secondaryRes.symbol, secondaryRes.tf)
+              : null) ||
+            (Array.isArray(this.positionsRepo.listActive?.())
+              ? this.positionsRepo.listActive().find((p) =>
+                  p &&
+                  p.status !== "CLOSED" &&
+                  p.status !== "EXPIRED" &&
+                  String(p.symbol || "").toUpperCase() === String(secondaryRes.symbol || "").toUpperCase() &&
+                  String(p.tf || "").toLowerCase() === String(secondaryRes.tf || "").toLowerCase()
+                )
+              : null);
+
+          if (existing) {
+            await this.signalsRepo.logScanThrottled({
+              chatId,
+              query: { symbol: secondaryRes.symbol || null, tf: secondaryRes.tf || null, raw: raw || "" },
+              meta: { reason: "DUPLICATE_ACTIVE_SECONDARY" }
+            });
+          } else {
+            // chart FIRST (ENTRY only)
+            const overlays2 = buildOverlays(secondaryRes);
+            const png2 = await renderEntryChart(secondaryRes, overlays2);
+            await this.sender.sendPhoto(chatId, png2);
+
+            const entryMsg2 = await this.sender.sendText(chatId, entryCard(secondaryRes));
+
+            // counters
+            try {
+              if (typeof this.stateRepo.bumpScanSignalsSent === "function") this.stateRepo.bumpScanSignalsSent(secondaryRes.tf);
+              else this.stateRepo.bumpScan(secondaryRes.tf);
+              if (typeof this.stateRepo.markSentPairTf === "function") this.stateRepo.markSentPairTf(secondaryRes.symbol, secondaryRes.tf);
+              await this.stateRepo.flush();
+            } catch {}
+
+            // log entry
+            await this.signalsRepo.logEntry({
+              source: "SCAN",
+              signal: secondaryRes,
+              meta: { chatId: String(chatId), raw: raw || "" }
+            });
+
+            // create monitored position (notify only requester chat)
+            const pos2 = createPositionFromSignal(secondaryRes, {
+              source: "SCAN",
+              notifyChatIds: [String(chatId)],
+              telegram: entryMsg2?.message_id
+                ? { entryMessageIds: { [String(chatId)]: entryMsg2.message_id } }
+                : null
+            });
+
+            pos2.createdAt = pos2.createdAt || Date.now();
+            pos2.expiresAt = pos2.expiresAt || (pos2.createdAt + ttlMsForTf(pos2.tf));
+            if (!pos2.filledAt && !pos2.hitTP1 && !pos2.hitTP2 && !pos2.hitTP3) {
+              pos2.status = "PENDING_ENTRY";
+            }
+
+            this.positionsRepo.upsert(pos2);
+            await this.positionsRepo.flush();
+          }
+        } catch {}
+      }
     });
   }
 }
