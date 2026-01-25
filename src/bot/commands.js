@@ -1,3 +1,4 @@
+// File: src/bot/commands.js
 import { entryCard } from "./cards/entryCard.js";
 import { recapCard } from "./cards/recapCard.js";
 import { buildOverlays } from "../charts/layout.js";
@@ -465,7 +466,9 @@ export class Commands {
         const tf = String(p?.tf || "").toLowerCase() || "N/A";
         const dir = normalizeDir(p);
         const st = entryHitTs(p) > 0 ? "RUN" : "PEND";
-        return dir ? `${sym} ${dir} (${tf}) ${st}` : `${sym} (${tf}) ${st}`;
+        const pb = inferPlaybook(p);
+        const tag = pb === "SWING" ? "[SWING]" : "[INTRADAY]";
+        return dir ? `${tag} ${sym} ${dir} (${tf}) ${st}` : `${tag} ${sym} (${tf}) ${st}`;
       };
 
       const intradayPositions = activeList.filter((p) => inferPlaybook(p) === "INTRADAY");

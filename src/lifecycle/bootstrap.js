@@ -1,3 +1,4 @@
+// File: src/lifecycle/bootstrap.js
 import { env } from "../config/env.js";
 import { validateEnvOrThrow } from "../config/validate.js";
 import { ensureDirs } from "../config/constants.js";
@@ -33,6 +34,7 @@ import { startRestSyncJob } from "../jobs/restSyncJob.js";
 
 import { Monitor } from "../positions/monitor.js";
 import { createPositionFromSignal } from "../positions/positionModel.js";
+import { isWinOutcome, isDirectSL } from "../positions/outcomes.js";
 
 import { entryCard } from "../bot/cards/entryCard.js";
 import { tp1Card } from "../bot/cards/tp1Card.js";
@@ -312,6 +314,23 @@ export async function bootstrap() {
     }
     const modeSummary = `INTRADAY: ${intradayCount} | SWING: ${swingCount}`;
 
+    const resultsByPlaybook = { INTRADAY: { closed: 0, win: 0, directSl: 0 }, SWING: { closed: 0, win: 0, directSl: 0 } };
+    try {
+      const all = (typeof positionsRepo.listAll === "function") ? positionsRepo.listAll() : (positionsRepo.list?.() || []);
+      const startMs = Date.parse(`${yesterdayKey}T00:00:00.000Z`);
+      const endMs = startMs + 24 * 60 * 60 * 1000;
+      for (const p of (Array.isArray(all) ? all : [])) {
+        const closedAt = Number(p?.closedAt || 0);
+        if (!closedAt || closedAt < startMs || closedAt >= endMs) continue;
+        const pb = String(p?.playbook || (String(p?.tf || "").toLowerCase() === swingTf ? "SWING" : "INTRADAY")).toUpperCase();
+        const bucket = resultsByPlaybook[pb] || (resultsByPlaybook[pb] = { closed: 0, win: 0, directSl: 0 });
+        bucket.closed += 1;
+        const win = isWinOutcome(p?.closeOutcome) || !!p?.hitTP1 || !!p?.hitTP2 || !!p?.hitTP3;
+        if (win) bucket.win += 1;
+        if (isDirectSL(p)) bucket.directSl += 1;
+      }
+    } catch {}
+
     const text = recapCard({
       dateKey: yesterdayKey,
       autoTotal: day.autoTotal,
@@ -322,7 +341,8 @@ export async function bootstrap() {
       win: day.win,
       lose: day.lose,
       macroSummary,
-      modeSummary
+      modeSummary,
+      resultsByPlaybook
     });
 
     for (const chatId of notifyChatIds) await sender.sendText(chatId, text);

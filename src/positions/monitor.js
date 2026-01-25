@@ -1,3 +1,4 @@
+// File: src/positions/monitor.js
 import { applyTP, applySL } from "./stateMachine.js";
 import { isWinOutcome } from "./outcomes.js";
 import { ENTRY_CONFIRM_MODE, ENTRY_CONFIRM_DWELL_MS } from "../config/constants.js";
@@ -54,7 +55,8 @@ function entryHitCardText(pos, price) {
 
   const tf = pos?.tf || "N/A";
   const sym = pos?.symbol || "N/A";
-  const mode = String(pos?.playbook || "INTRADAY").toUpperCase() === "SWING" ? "Swing" : "Intraday";
+  const pb = String(pos?.playbook || (String(tf).toLowerCase() === "4h" ? "SWING" : "INTRADAY")).toUpperCase();
+  const mode = pb === "SWING" ? "Swing" : "Intraday";
 
   const low = pos?.levels?.entryLow;
   const high = pos?.levels?.entryHigh;

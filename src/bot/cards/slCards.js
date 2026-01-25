@@ -1,3 +1,4 @@
+// File: src/bot/cards/slCards.js
 import { fmtPrice } from "../../utils/format.js";
 
 
@@ -81,7 +82,9 @@ export function slCard(pos) {
     "━━━━━━━━━━━━━━━━━━",
     "🛑 PRICE REVERSED — STOP LOSS HIT",
     `🪙 Pair: ${pos.symbol}`,
+    `Mode: ${modeLabel(pb)}`,
     `Signal TF: ${pos.tf}`,
+    conf ? `Confluence: Intraday + Swing` : null,
     "",
     "✅ TP1 & TP2 were hit",
     "Price reversed",
