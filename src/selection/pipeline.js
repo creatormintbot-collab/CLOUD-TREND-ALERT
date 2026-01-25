@@ -21,50 +21,6 @@ export class Pipeline {
     this.stateRepo = stateRepo;
     this.rotationRepo = rotationRepo;
     this.env = env;
-    this._warmupDone = new Set(); // scan warmup guard (avoid REST spam)
-  }
-
-  async _maybeWarmupKlines(symbols, tfs, reason = "scan") {
-    try {
-      if (!this.klines || typeof this.klines.getCandles !== "function" || typeof this.klines.backfill !== "function") return;
-
-      const minCandles = 220; // must satisfy ranker.fastScore + signalEngine candles requirement
-      const maxSyms = Math.max(6, Math.min(12, Number(this.env?.TOP10_PER_TF ?? 10)));
-
-      const symList = Array.from(new Set((symbols || [])
-        .map((s) => String(s || "").toUpperCase())
-        .filter(Boolean)))
-        .slice(0, maxSyms);
-
-      const tfList = Array.from(new Set((tfs || [])
-        .map((x) => String(x || "").trim().toLowerCase())
-        .filter(Boolean)));
-
-      for (const tf of tfList) {
-        const guardKey = `${reason}|${tf}`;
-        if (this._warmupDone?.has(guardKey)) continue;
-
-        const need = [];
-        for (const s of symList) {
-          const n = (this.klines.getCandles(s, tf) || []).length;
-          if (n < minCandles) need.push(s);
-        }
-
-        // Mark as attempted to avoid repeated backfills if scan is spammed
-        this._warmupDone?.add(guardKey);
-
-        if (!need.length) continue;
-
-        // Non-spam: one line per tf per reason
-        (this.env?.LOG_LEVEL === "debug" ? console.debug : console.info)(
-          `[SCAN] warmup_backfill ${reason} tf=${tf} need=${need.length}/${symList.length} min=${minCandles}`
-        );
-
-        await this.klines.backfill(need, [tf]);
-      }
-    } catch {
-      // ignore warmup errors (scan will still run on whatever cache exists)
-    }
   }
 
   _scanTimeframes() {
@@ -112,6 +68,54 @@ export class Pipeline {
     return this.stateRepo.getRankCache();
   }
 
+
+async _maybeWarmupKlines(symbols, tfs, reason = "scan", opts = {}) {
+  const minCandles = Number(opts?.minCandles ?? 220);
+  const maxSyms = Number(opts?.maxSyms ?? 12);
+  const retryMs = Number(opts?.retryMs ?? this.env?.SCAN_WARMUP_RETRY_MS ?? 120000);
+
+  if (!Array.isArray(symbols) || symbols.length === 0) return;
+  if (!Array.isArray(tfs) || tfs.length === 0) return;
+
+  if (!this.klines || typeof this.klines.getCandles !== "function" || typeof this.klines.backfill !== "function") {
+    return;
+  }
+
+  if (!this._warmupLocks) this._warmupLocks = new Map();
+  const key = `${reason}|${tfs.map((x) => normTf(String(x))).join(",")}`;
+  const now = Date.now();
+  const last = this._warmupLocks.get(key) || 0;
+  if (now - last < retryMs) return;
+
+  const subset = symbols.slice(0, maxSyms);
+  const needSymbols = [];
+  for (const sym of subset) {
+    let ok = true;
+    for (const tf of tfs) {
+      const n = (this.klines.getCandles(sym, tf) || []).length;
+      if (!Number.isFinite(n) || n < minCandles) { ok = false; break; }
+    }
+    if (!ok) needSymbols.push(sym);
+  }
+  if (!needSymbols.length) return;
+
+  this._warmupLocks.set(key, now);
+
+  const log = (this.env?.LOG_LEVEL === "debug") ? console.debug : console.info;
+  log(`[SCAN] warmup_backfill_start ${JSON.stringify({ reason, symbolCount: needSymbols.length, symbols: needSymbols.slice(0, 6), tfs })}`);
+
+  try {
+    await this.klines.backfill(needSymbols, tfs);
+    const stillMissing = needSymbols.filter((sym) => tfs.some((tf) => ((this.klines.getCandles(sym, tf) || []).length < minCandles)));
+    if (stillMissing.length) {
+      log(`[SCAN] warmup_backfill_partial ${JSON.stringify({ reason, stillMissing: stillMissing.slice(0, 6), stillMissingCount: stillMissing.length })}`);
+    } else {
+      log(`[SCAN] warmup_backfill_done ${JSON.stringify({ reason, symbolCount: needSymbols.length, tfs })}`);
+    }
+  } catch (e) {
+    console.warn(`[SCAN] warmup_backfill_error ${JSON.stringify({ reason, err: (e && (e.message || e.stack)) ? String(e.message || e.stack).slice(0, 400) : String(e) })}`);
+  }
+}
   async scanOneBest(chatId) {
     const symbols = (this.universe.symbolsForScan?.() || this.universe.symbols?.() || []);
     const sym = this.rotationRepo.pickNext(symbols);
@@ -124,10 +128,6 @@ export class Pipeline {
   async scanPair(symbol) {
     const tfs = this._scanTimeframes();
     const results = [];
-
-    // Warmup klines cache (REST backfill) if intraday candles are missing (prevents /scan from returning swing-only).
-    await this._maybeWarmupKlines([symbol], tfs, "scan_pair");
-
 
     for (const tf of tfs) {
       const r = evaluateSignal({
@@ -151,8 +151,6 @@ export class Pipeline {
   }
 
   async scanPairTf(symbol, tf) {
-    // Warmup klines cache if needed (keeps explain/evaluate consistent after restart).
-    await this._maybeWarmupKlines([symbol], [tf], "scan_pair_tf");
     const r = evaluateSignal({
       symbol,
       tf,
@@ -168,212 +166,163 @@ export class Pipeline {
   // - INTRADAY: best of 15m/30m/1h
   // - SWING: 4h (SECONDARY_TIMEFRAME)
   // Returns { primary, secondary } where primary is preferred (SWING when available).
-  async scanPairDual(symbol) {
-    const swingTf = String(this.env?.SECONDARY_TIMEFRAME || "4h");
-    const all = this._scanTimeframes();
 
-    const intradayTfs = all.filter((t) => !isSwingTf(t, this.env));
+async scanPairDual(symbol) {
+  const sym = String(symbol || "").toUpperCase();
+  if (!sym) return { primary: null, secondary: null };
 
-    // Warmup klines cache for both playbooks (keeps intraday available for fallback on duplicate swing).
-    await this._maybeWarmupKlines([symbol], [...intradayTfs, swingTf], "scan_pair_dual");
+  const swingTf = this.env.SECONDARY_TIMEFRAME || "4h";
+  const scanTfs = this._scanTimeframes();
+  const intradayTfs = scanTfs.filter((tf) => !isSwingTf(tf, this.env));
+  const allTfs = Array.from(new Set([ ...intradayTfs, swingTf ]));
 
-    const resultsIntraday = [];
-    for (const tf of intradayTfs) {
-      const r = evaluateSignal({
-        symbol,
-        tf,
-        klines: this.klines,
-        thresholds: this.thresholds,
-        env: this.env,
-        isAuto: false
-      });
-      if (r?.ok) resultsIntraday.push(r);
-    }
+  // Ensure we have enough candles for both Intraday + Swing.
+  try {
+    await this._maybeWarmupKlines([sym], allTfs, "scanPairDual", { minCandles: 220, maxSyms: 1, retryMs: 60000 });
+  } catch {}
 
-    resultsIntraday.sort((a, b) => b.score - a.score);
-    const topIntraday = resultsIntraday[0] || null;
-
-    let topSwing = null;
-    {
-      const r = evaluateSignal({
-        symbol,
-        tf: swingTf,
-        klines: this.klines,
-        thresholds: this.thresholds,
-        env: this.env,
-        isAuto: false
-      });
-      if (r?.ok) {
-        // 4h publish rule for /scan (LOCKED)
-        if (String(r.tf).toLowerCase() === String(this.env.SECONDARY_TIMEFRAME || "4h").toLowerCase()) {
-          if (String(symbol).toUpperCase() !== "ETHUSDT" && r.score < this.env.SECONDARY_MIN_SCORE) {
-            topSwing = null;
-          } else {
-            topSwing = r;
-          }
-        } else {
-          topSwing = r;
-        }
-      }
-    }
-
-    if (!topSwing && !topIntraday) return { primary: null, secondary: null };
-
-    // Same pair rules (LOCKED):
-    // - If both playbooks align direction => send 1 card (prefer SWING) with confluence tag.
-    // - If both exist but opposite direction => do NOT send two directions; prefer SWING only.
-    if (topSwing && topIntraday) {
-      if (String(topSwing.direction) === String(topIntraday.direction)) {
-        // Confluence (LOCK): keep secondary for fallback if SWING is duplicate.
-        topSwing.confluence = "INTRADAY + SWING";
-        topSwing.confluenceTfs = [topIntraday.tf, topSwing.tf];
-
-        // Mirror on intraday too (helps fallback UX if primary is blocked)
-        topIntraday.confluence = "INTRADAY + SWING";
-        topIntraday.confluenceTfs = [topIntraday.tf, topSwing.tf];
-
-        return { primary: topSwing, secondary: topIntraday };
-      }
-      return { primary: topSwing, secondary: null };
-    }
-
-    return topSwing
-      ? { primary: topSwing, secondary: null }
-      : { primary: topIntraday, secondary: null };
+  const results = [];
+  for (const tf of allTfs) {
+    const r = await evaluateSignal({
+      symbol: sym,
+      tf,
+      klines: this.klines,
+      thresholds: this.thresholds,
+      env: this.env,
+      isAuto: false,
+      secondaryMinScore: this._secondaryMinScore(sym),
+    });
+    if (r?.ok) results.push(r);
   }
+
+  const swingPool = results.filter((r) => isSwingTf(r.tf, this.env));
+  const intraPool = results.filter((r) => !isSwingTf(r.tf, this.env));
+
+  const topSwing = swingPool.sort((a, b) => (b.score || 0) - (a.score || 0))[0] || null;
+  const topIntraday = intraPool.sort((a, b) => (b.score || 0) - (a.score || 0))[0] || null;
+
+  return { primary: topSwing, secondary: topIntraday };
+}
 
   // /scan default (LOCKED): find best INTRADAY + best SWING across universe.
   // Output ideal: max 2 signals (Top 1 Intraday + Top 1 Swing), with guardrails.
-  async scanBestDual(opts = null) {
-    // Optional exclude list (used by /scan fallback rescan). Backward compatible.
-    let excludeSymbols = [];
-    if (Array.isArray(opts)) excludeSymbols = opts;
-    else if (opts && typeof opts === "object") excludeSymbols = opts.excludeSymbols || opts.exclude || [];
-    const excludeSet = new Set((excludeSymbols || []).map((s) => String(s || "").toUpperCase()).filter(Boolean));
 
-    const symbolsAll = (this.universe.symbolsForScan?.() || this.universe.symbols?.() || []);
-    const symbols = excludeSet.size
-      ? symbolsAll.filter((s) => !excludeSet.has(String(s || "").toUpperCase()))
-      : symbolsAll;
-    const all = this._scanTimeframes();
-    const swingTf = String(this.env?.SECONDARY_TIMEFRAME || "4h");
-    const intradayTfs = all.filter((t) => !isSwingTf(t, this.env));
+  async scanBestDual(opts = {}) {
+    const excludeSet = new Set((opts?.excludeSymbols || []).map((s) => String(s || "").toUpperCase()).filter(Boolean));
 
-    const topN = Number(this.env?.TOP10_PER_TF ?? 10);
+    const swingTf = this.env.SECONDARY_TIMEFRAME || "4h";
+    const scanTfs = this._scanTimeframes();
+    const intradayTfs = scanTfs.filter((tf) => !isSwingTf(tf, this.env));
+    const allTfs = Array.from(new Set([ ...intradayTfs, swingTf ]));
 
-    // Warmup klines cache for top volume symbols to ensure intraday candidates exist (fastScore requires >=220 candles).
-    const warmRows = await this.topVolumeCached(Math.min(symbols.length || 0, Math.max(6, topN)));
-    const warmSymbols = (warmRows || []).map((r) => r.symbol).filter(Boolean);
-    await this._maybeWarmupKlines(warmSymbols.length ? warmSymbols : symbols, [...intradayTfs, swingTf], "scan_best_dual");
+    // Candidate universe (symbols)
+    const symbolsRaw = (typeof this.universe.symbolsForScan === "function" ? this.universe.symbolsForScan() : null) || [];
+    const symbols = symbolsRaw
+      .map((s) => String(s || "").toUpperCase())
+      .filter((s) => s && !excludeSet.has(s));
 
+    if (!symbols.length) return { primary: null, secondary: null };
 
-    const intradayCandidates = [];
-    for (const tf of intradayTfs) {
-      const shortlist = symbols
-        .map((s) => ({ symbol: s, tf, fast: this.ranker.fastScore(s, tf, this.thresholds) }))
-        .sort((a, b) => b.fast - a.fast)
-        .slice(0, topN);
+    // Warmup klines for a small subset to avoid "all fastScore=0" due to missing candles.
+    try {
+      const warmRows = await this.topVolumeCached(Math.max(12, this.env.TOP10_PER_TF || 10));
+      const warmSymbols = (warmRows && warmRows.length ? warmRows.map((r) => String(r.symbol || "").toUpperCase()) : symbols)
+        .filter((s) => s && !excludeSet.has(s));
+      await this._maybeWarmupKlines(warmSymbols, allTfs, "scanBestDual", { minCandles: 220, maxSyms: 12 });
+    } catch {}
 
+    const bestPerTf = [];
+    for (const tf of scanTfs) {
+      const scored = [];
+
+      for (const sym of symbols) {
+        const fast = this.ranker.fastScore(sym, tf, this.klines, this.thresholds);
+        if (fast <= 0) continue;
+        scored.push({ symbol: sym, tf, fast });
+      }
+
+      scored.sort((a, b) => b.fast - a.fast);
+      const shortlist = scored.slice(0, this.env.TOP10_PER_TF || 10);
+
+      let best = null;
       for (const row of shortlist) {
-        if (row.fast <= 0) continue;
-        const r = evaluateSignal({
+        const res = await evaluateSignal({
           symbol: row.symbol,
           tf: row.tf,
           klines: this.klines,
           thresholds: this.thresholds,
           env: this.env,
-          isAuto: false
+          isAuto: false,
+          secondaryMinScore: this._secondaryMinScore(row.symbol),
         });
-        if (r?.ok) intradayCandidates.push(r);
+        if (!res?.ok) continue;
+        if (!best || (res.score || 0) > (best.score || 0)) best = res;
       }
+
+      if (best) bestPerTf.push(best);
     }
 
+    const swingPool = bestPerTf.filter((r) => isSwingTf(r.tf, this.env));
+    const intraPool = bestPerTf.filter((r) => !isSwingTf(r.tf, this.env));
 
-    // Fallback: if intradayCandidates is empty (common after cold start or cache gaps),
-    // attempt a bounded scan on warmed/top-volume symbols without relying on fastScore.
-    if (!intradayCandidates.length && intradayTfs.length) {
-      const seedSyms = (warmSymbols && warmSymbols.length) ? warmSymbols : symbols.slice(0, Math.max(6, topN));
-      const seen = new Set();
-      for (const tf of intradayTfs) {
-        for (const s of seedSyms.slice(0, Math.min(seedSyms.length, Math.max(6, topN)))) {
-          const key = `${String(s).toUpperCase()}|${String(tf).toLowerCase()}`;
-          if (seen.has(key)) continue;
-          seen.add(key);
+    const topSwing = swingPool.sort((a, b) => (b.score || 0) - (a.score || 0))[0] || null;
+    const topIntraday = intraPool.sort((a, b) => (b.score || 0) - (a.score || 0))[0] || null;
 
-          const r = evaluateSignal({
-            symbol: s,
-            tf,
-            klines: this.klines,
-            thresholds: this.thresholds,
-            env: this.env,
-            isAuto: false
-          });
-          if (r?.ok) intradayCandidates.push(r);
-        }
-      }
-      if (this.env?.LOG_LEVEL === "debug" && !intradayCandidates.length) {
-        console.debug(`[SCAN] intraday_empty fallback_scanned syms=${seedSyms.length} tfs=${intradayTfs.join(",")}`);
-      }
-    }
-
-    const swingCandidates = [];
-    {
-      const shortlist = symbols
-        .map((s) => ({ symbol: s, tf: swingTf, fast: this.ranker.fastScore(s, swingTf, this.thresholds) }))
-        .sort((a, b) => b.fast - a.fast)
-        .slice(0, topN);
-
-      for (const row of shortlist) {
-        if (row.fast <= 0) continue;
-        const r = evaluateSignal({
-          symbol: row.symbol,
-          tf: swingTf,
-          klines: this.klines,
-          thresholds: this.thresholds,
-          env: this.env,
-          isAuto: false
-        });
-        if (!r?.ok) continue;
-        // 4h publish rule for /scan (LOCKED)
-        if (String(r.symbol).toUpperCase() !== "ETHUSDT" && r.score < this.env.SECONDARY_MIN_SCORE) continue;
-        swingCandidates.push(r);
-      }
-    }
-
-    intradayCandidates.sort((a, b) => b.score - a.score);
-    swingCandidates.sort((a, b) => b.score - a.score);
-
-    const topIntraday = intradayCandidates[0] || null;
-    const topSwing = swingCandidates[0] || null;
-
-    if (!topSwing && !topIntraday) return { primary: null, secondary: null };
-
-    // Prefer SWING as primary when available.
-    if (topSwing && !topIntraday) return { primary: topSwing, secondary: null };
-    if (!topSwing && topIntraday) return { primary: topIntraday, secondary: null };
-
-    // Guardrail: if same pair
-    if (String(topSwing.symbol) === String(topIntraday.symbol)) {
-      if (String(topSwing.direction) === String(topIntraday.direction)) {
-        // Confluence (LOCK): keep secondary for fallback if SWING is duplicate.
-        topSwing.confluence = "INTRADAY + SWING";
-        topSwing.confluenceTfs = [topIntraday.tf, topSwing.tf];
-
-        // Mirror on intraday too (helps fallback UX if primary is blocked)
-        topIntraday.confluence = "INTRADAY + SWING";
-        topIntraday.confluenceTfs = [topIntraday.tf, topSwing.tf];
-
-        return { primary: topSwing, secondary: topIntraday };
-      }
-
-      // Same pair but opposite direction => pick another intraday candidate (different symbol).
-      const alt = intradayCandidates.find((c) => String(c.symbol) !== String(topSwing.symbol));
-      return { primary: topSwing, secondary: alt || null };
-    }
-
+    // Return Swing as primary, Intraday as secondary (LOCK)
     return { primary: topSwing, secondary: topIntraday };
   }
 
+
+async scanBestIntraday(opts = {}) {
+  const excludeSet = new Set((opts?.excludeSymbols || []).map((s) => String(s || "").toUpperCase()).filter(Boolean));
+
+  const scanTfs = this._scanTimeframes();
+  const intradayTfs = scanTfs.filter((tf) => !isSwingTf(tf, this.env));
+  if (!intradayTfs.length) return null;
+
+  const symbolsRaw = (typeof this.universe.symbolsForScan === "function" ? this.universe.symbolsForScan() : null) || [];
+  const symbols = symbolsRaw
+    .map((s) => String(s || "").toUpperCase())
+    .filter((s) => s && !excludeSet.has(s));
+
+  if (!symbols.length) return null;
+
+  try {
+    const warmRows = await this.topVolumeCached(Math.max(12, this.env.TOP10_PER_TF || 10));
+    const warmSymbols = (warmRows && warmRows.length ? warmRows.map((r) => String(r.symbol || "").toUpperCase()) : symbols)
+      .filter((s) => s && !excludeSet.has(s));
+    await this._maybeWarmupKlines(warmSymbols, intradayTfs, "scanBestIntraday", { minCandles: 220, maxSyms: 12 });
+  } catch {}
+
+  const candidates = [];
+  for (const tf of intradayTfs) {
+    const scored = [];
+    for (const sym of symbols) {
+      const fast = this.ranker.fastScore(sym, tf, this.klines, this.thresholds);
+      if (fast <= 0) continue;
+      scored.push({ symbol: sym, tf, fast });
+    }
+
+    scored.sort((a, b) => b.fast - a.fast);
+    const shortlist = scored.slice(0, this.env.TOP10_PER_TF || 10);
+
+    for (const row of shortlist) {
+      const res = await evaluateSignal({
+        symbol: row.symbol,
+        tf: row.tf,
+        klines: this.klines,
+        thresholds: this.thresholds,
+        env: this.env,
+        isAuto: false,
+        secondaryMinScore: this._secondaryMinScore(row.symbol),
+      });
+      if (res?.ok) candidates.push(res);
+    }
+  }
+
+  candidates.sort((a, b) => (b.score || 0) - (a.score || 0));
+  return candidates[0] || null;
+}
 
   explainPair(symbol) {
     const tfs = this._scanTimeframes();

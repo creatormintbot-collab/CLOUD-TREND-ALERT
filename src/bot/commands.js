@@ -1,4 +1,3 @@
-// File: src/bot/commands.js
 import { entryCard } from "./cards/entryCard.js";
 import { recapCard } from "./cards/recapCard.js";
 import { buildOverlays } from "../charts/layout.js";
@@ -466,9 +465,7 @@ export class Commands {
         const tf = String(p?.tf || "").toLowerCase() || "N/A";
         const dir = normalizeDir(p);
         const st = entryHitTs(p) > 0 ? "RUN" : "PEND";
-        const pb = inferPlaybook(p);
-        const tag = pb === "SWING" ? "[SWING]" : "[INTRADAY]";
-        return dir ? `${tag} ${sym} ${dir} (${tf}) ${st}` : `${tag} ${sym} (${tf}) ${st}`;
+        return dir ? `${sym} ${dir} (${tf}) ${st}` : `${sym} (${tf}) ${st}`;
       };
 
       const intradayPositions = activeList.filter((p) => inferPlaybook(p) === "INTRADAY");
@@ -1030,38 +1027,80 @@ export class Commands {
         }
       } catch {}
 
-      // If primary is duplicate in rotation-mode /scan, try fallback (LOCK: never stop early)
-      if (primaryDuplicatePos && rotationMode) {
-        try {
-          secondaryDuplicatePos = secondaryPick ? findActiveDup(secondaryPick) : null;
-          if (!secondaryPick || secondaryDuplicatePos) {
-            const exclude = [res?.symbol, secondaryPick?.symbol].filter(Boolean);
-            scanLog("fallback_rescan_start", { exclude });
-            const dual = await this.pipeline.scanBestDual({ excludeSymbols: exclude });
-            if (dual?.primary) {
-              res = dual.primary;
-              secondaryPick = dual.secondary || null;
-              ensurePlaybook(res);
-              ensurePlaybook(secondaryPick);
-              onlyOneCard = applyGuardrails();
-              primaryDuplicatePos = findActiveDup(res);
-              secondaryDuplicatePos = secondaryPick ? findActiveDup(secondaryPick) : null;
-              scanLog("fallback_rescan_result", {
-                primary: { symbol: normSym(res?.symbol), tf: String(res?.tf || ""), dir: normDir(res?.direction) },
-                secondary: secondaryPick ? { symbol: normSym(secondaryPick?.symbol), tf: String(secondaryPick?.tf || ""), dir: normDir(secondaryPick?.direction) } : null
-              });
-            } else {
-              scanLog("fallback_rescan_none", { exclude });
-            }
-          } else {
-            scanLog("fallback_secondary_ok", { symbol: normSym(secondaryPick?.symbol), tf: String(secondaryPick?.tf || "") });
-          }
-        } catch (e) {
-          scanLog("fallback_rescan_error", { err: String(e) });
-        }
-      }
+      
+// If primary is duplicate in rotation-mode /scan, try fallback (LOCK: never stop early)
+if (rotationMode && primaryDuplicatePos) {
+  const primarySym = res.symbol;
+  const secondarySym = secondaryPick?.symbol || null;
+  const exclude = [primarySym, secondarySym].filter(Boolean);
 
-      if (primaryDuplicatePos) {
+  // If we already have a non-duplicate Intraday candidate, send it instead of blocking the scan.
+  if (secondaryPick) {
+    const secondaryDuplicatePos = findActiveDup(secondaryPick);
+    if (!secondaryDuplicatePos) {
+      scanLog("primary_duplicate_use_secondary", {
+        primary: { symbol: primarySym, tf: res.tf },
+        secondary: { symbol: secondaryPick.symbol, tf: secondaryPick.tf },
+      });
+
+      res = secondaryPick;
+      secondaryPick = null;
+      onlyOneCard = true;
+      primaryDuplicatePos = null;
+    }
+  }
+
+  // If still duplicate, try an Intraday-only fallback excluding the primary symbol (if supported).
+  if (primaryDuplicatePos && typeof this.pipeline.scanBestIntraday === "function") {
+    try {
+      const intr = await this.pipeline.scanBestIntraday({ excludeSymbols: [primarySym] });
+      if (intr?.ok && !findActiveDup(intr)) {
+        scanLog("fallback_intraday_found", {
+          symbol: intr.symbol,
+          tf: intr.tf,
+          score: intr.score,
+          dir: intr.dir,
+        });
+
+        res = intr;
+        secondaryPick = null;
+        onlyOneCard = true;
+        primaryDuplicatePos = null;
+      }
+    } catch {}
+  }
+
+  // If still duplicate, do the original rescan excluding the duplicate symbol(s)
+  if (primaryDuplicatePos) {
+    scanLog("fallback_rescan_start", { exclude });
+
+    try {
+      const dual2 = await this.pipeline.scanBestDual({ excludeSymbols: exclude });
+
+      const primary2 = dual2?.primary || null;
+      const secondary2 = dual2?.secondary || null;
+
+      scanLog("fallback_rescan_result", {
+        primary: primary2 ? { symbol: primary2.symbol, tf: primary2.tf, dir: primary2.dir } : null,
+        secondary: secondary2 ? { symbol: secondary2.symbol, tf: secondary2.tf, dir: secondary2.dir } : null,
+      });
+
+      // Prefer primary2 if not duplicate; otherwise prefer secondary2 if not duplicate.
+      if (primary2?.ok && !findActiveDup(primary2)) {
+        res = primary2;
+        secondaryPick = secondary2?.ok ? secondary2 : null;
+        primaryDuplicatePos = null;
+      } else if (secondary2?.ok && !findActiveDup(secondary2)) {
+        res = secondary2;
+        secondaryPick = null;
+        onlyOneCard = true;
+        primaryDuplicatePos = null;
+      }
+    } catch {}
+  }
+}
+
+if (primaryDuplicatePos) {
         scanLog("primary_blocked_duplicate", {
           symbol: normSym(res?.symbol),
           tf: String(res?.tf || ""),
