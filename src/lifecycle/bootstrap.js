@@ -151,68 +151,135 @@ export async function bootstrap() {
     cards: { tp1Card, tp2Card, tp3Card, slCard }
   });
 
-  const runAuto = async () => {
-    const todayAuto = stateRepo.getAutoTotalToday();
-    if (todayAuto >= env.MAX_SIGNALS_PER_DAY) return;
+    const runAuto = async () => {
 
-    let advanced = false;
-    for (const tf of [...env.SCAN_TIMEFRAMES, env.SECONDARY_TIMEFRAME]) {
-      const clock = klines.lastClosedTime(tf);
-      if (clock && clock > stateRepo.lastAutoCandle(tf)) advanced = true;
-    }
-    if (!advanced) return;
+  const todayAuto = stateRepo.getAutoTotalToday();
+  if (todayAuto >= env.MAX_SIGNALS_PER_DAY) return;
 
-    const candidates = await pipeline.autoPickCandidates();
-    if (!candidates.length) {
-      for (const tf of [...env.SCAN_TIMEFRAMES, env.SECONDARY_TIMEFRAME]) {
-        const clock = klines.lastClosedTime(tf);
-        if (clock) stateRepo.markAutoCandle(tf, clock);
-      }
-      await stateRepo.flush();
-      return;
-    }
+  let advanced = false;
+  for (const tf of [...env.SCAN_TIMEFRAMES, env.SECONDARY_TIMEFRAME]) {
+    const clock = klines.lastClosedTime(tf);
+    if (clock && clock > stateRepo.lastAutoCandle(tf)) advanced = true;
+  }
+  if (!advanced) return;
 
-    const remaining = Math.max(0, env.MAX_SIGNALS_PER_DAY - todayAuto);
-    const limit = Math.min(env.SEND_TOP_N, remaining);
-
-    const chosen = [];
-    for (const sig of candidates) {
-      if (chosen.length >= limit) break;
-      if (!stateRepo.canSendSymbol(sig.symbol, env.COOLDOWN_MINUTES)) continue;
-      chosen.push(sig);
-      stateRepo.markSent(sig.symbol);
-    }
-
+  const candidates = await pipeline.autoPickCandidates();
+  if (!candidates.length) {
     for (const tf of [...env.SCAN_TIMEFRAMES, env.SECONDARY_TIMEFRAME]) {
       const clock = klines.lastClosedTime(tf);
       if (clock) stateRepo.markAutoCandle(tf, clock);
     }
+    await stateRepo.flush();
+    return;
+  }
 
-    for (const sig of chosen) {
-      const overlays = buildOverlays(sig);
-      const png = await renderEntryChart(sig, overlays);
+  const remaining = Math.max(0, env.MAX_SIGNALS_PER_DAY - todayAuto);
+  const limit = Math.min(env.SEND_TOP_N, remaining);
 
-      const entryMessageIds = {};
+  const normTf = (x) => String(x || "").trim().toLowerCase();
+  const swingTf = normTf(env.SECONDARY_TIMEFRAME || "4h");
+  const playbookOf = (sig) => String(sig?.playbook || (normTf(sig?.tf) === swingTf ? "SWING" : "INTRADAY")).toUpperCase();
+  const dirOf = (sig) => String(sig?.direction || "").toUpperCase();
 
-      for (const chatId of notifyChatIds) {
-        await sender.sendPhoto(chatId, png);
-        const msg = await sender.sendText(chatId, entryCard(sig));
-        if (msg?.message_id) entryMessageIds[String(chatId)] = msg.message_id;
+  // LOCK: AUTO prefers top Swing + top Intraday (max 2), with guardrails.
+  let bestSwing = null;
+  let bestIntra = null;
+
+  for (const sig of candidates) {
+    const pb = playbookOf(sig);
+    if (pb === "SWING" && !bestSwing) bestSwing = sig;
+    if (pb === "INTRADAY" && !bestIntra) bestIntra = sig;
+    if (bestSwing && bestIntra) break;
+  }
+
+  const preliminary = [];
+  if (limit >= 1) {
+    const primary = bestSwing || bestIntra;
+    if (primary) preliminary.push(primary);
+  }
+
+  if (limit >= 2 && bestSwing && bestIntra) {
+    const symSame = String(bestSwing.symbol) === String(bestIntra.symbol);
+    const dirSame = dirOf(bestSwing) === dirOf(bestIntra) && dirOf(bestSwing) !== "";
+
+    if (symSame && dirSame) {
+      // Confluence: prefer Swing only + tag
+      bestSwing.confluence = true;
+      bestSwing.confluenceTfs = Array.from(new Set([bestIntra.tf, bestSwing.tf].filter(Boolean)));
+    } else if (symSame && !dirSame) {
+      // Opposite direction on same pair: find another intraday candidate (different symbol)
+      let alt = null;
+      for (const sig of candidates) {
+        if (playbookOf(sig) !== "INTRADAY") continue;
+        if (String(sig.symbol) === String(bestSwing.symbol)) continue;
+        alt = sig;
+        break;
       }
+      if (alt) preliminary.push(alt);
+    } else {
+      // Different symbols: allow both
+      if (preliminary.length === 1 && preliminary[0] === bestSwing) preliminary.push(bestIntra);
+      else if (preliminary.length === 1 && preliminary[0] === bestIntra) preliminary.unshift(bestSwing);
+    }
+  }
 
-      const pos = createPositionFromSignal(sig, {
-        source: "AUTO",
-        notifyChatIds,
-        telegram: Object.keys(entryMessageIds).length ? { entryMessageIds } : null
-      });
-      positionsRepo.upsert(pos);
+  // LOCK: cooldown at least per pair+direction, ideally per playbook.
+  const chosen = [];
+  for (const sig of preliminary) {
+    const pb = playbookOf(sig);
+    const dir = dirOf(sig);
+    if (!dir) continue;
 
-      stateRepo.bumpAuto(sig.tf, sig.score, sig.macro.BTC_STATE);
-      await signalsRepo.logEntry({ source: "AUTO", signal: sig, meta: { publishedTo: notifyChatIds } });
+    const okPlaybook = typeof stateRepo.canSendPairSidePlaybook === "function"
+      ? stateRepo.canSendPairSidePlaybook(sig.symbol, dir, pb, env.COOLDOWN_MINUTES)
+      : null;
+
+    const ok = (okPlaybook !== null)
+      ? okPlaybook
+      : (typeof stateRepo.canSendPairSide === "function"
+        ? stateRepo.canSendPairSide(sig.symbol, dir, env.COOLDOWN_MINUTES)
+        : stateRepo.canSendSymbol(sig.symbol, env.COOLDOWN_MINUTES));
+
+    if (!ok) continue;
+
+    chosen.push(sig);
+
+    if (typeof stateRepo.markSentPairSidePlaybook === "function") stateRepo.markSentPairSidePlaybook(sig.symbol, dir, pb);
+    else if (typeof stateRepo.markSentPairSide === "function") stateRepo.markSentPairSide(sig.symbol, dir);
+    else stateRepo.markSent(sig.symbol);
+  }
+
+  for (const tf of [...env.SCAN_TIMEFRAMES, env.SECONDARY_TIMEFRAME]) {
+    const clock = klines.lastClosedTime(tf);
+    if (clock) stateRepo.markAutoCandle(tf, clock);
+  }
+
+  for (const sig of chosen) {
+    const overlays = buildOverlays(sig);
+    const png = await renderEntryChart(sig, overlays);
+
+    const entryMessageIds = {};
+
+    for (const chatId of notifyChatIds) {
+      await sender.sendPhoto(chatId, png);
+      const msg = await sender.sendText(chatId, entryCard(sig));
+      if (msg?.message_id) entryMessageIds[String(chatId)] = msg.message_id;
     }
 
-    await Promise.all([positionsRepo.flush(), stateRepo.flush(), signalsRepo.flush()]);
+    const pos = createPositionFromSignal(sig, {
+      source: "AUTO",
+      notifyChatIds,
+      telegram: Object.keys(entryMessageIds).length ? { entryMessageIds } : null
+    });
+    positionsRepo.upsert(pos);
+
+    stateRepo.bumpAuto(sig.tf, sig.score, sig.macro.BTC_STATE);
+    await signalsRepo.logEntry({ source: "AUTO", signal: sig, meta: { publishedTo: notifyChatIds } });
+  }
+
+  await Promise.all([positionsRepo.flush(), stateRepo.flush(), signalsRepo.flush()]);
   };
+
 
   const runMonitor = async () => {
     await monitor.tick(notifyChatIds);
@@ -232,6 +299,19 @@ export async function bootstrap() {
     const avgScore = day.scoreCount ? day.scoreSum / day.scoreCount : 0;
     const macroSummary = `BULLISH: ${day.macro.BULLISH} | BEARISH: ${day.macro.BEARISH} | NEUTRAL: ${day.macro.NEUTRAL}`;
 
+    const tfb = day.tfBreakdown || {};
+    const swingTf = String(env.SECONDARY_TIMEFRAME || "4h").toLowerCase();
+    let intradayCount = 0;
+    let swingCount = 0;
+    for (const [k, v] of Object.entries(tfb)) {
+      const tf = String(k || "").toLowerCase();
+      const c = Number(v) || 0;
+      if (!c) continue;
+      if (tf === swingTf || tf === "4h") swingCount += c;
+      else intradayCount += c;
+    }
+    const modeSummary = `INTRADAY: ${intradayCount} | SWING: ${swingCount}`;
+
     const text = recapCard({
       dateKey: yesterdayKey,
       autoTotal: day.autoTotal,
@@ -241,7 +321,8 @@ export async function bootstrap() {
       avgScore,
       win: day.win,
       lose: day.lose,
-      macroSummary
+      macroSummary,
+      modeSummary
     });
 
     for (const chatId of notifyChatIds) await sender.sendText(chatId, text);

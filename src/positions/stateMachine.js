@@ -10,6 +10,19 @@ function ensureTpHitMax(pos) {
   return 0;
 }
 
+
+function beOffsetSL(pos) {
+  const entry = Number(pos?.levels?.entryMid);
+  const sl0 = Number(pos?.slInitial ?? pos?.levels?.sl);
+  if (!Number.isFinite(entry) || !Number.isFinite(sl0)) return entry;
+  const R = Math.abs(entry - sl0);
+  const delta = 0.10 * R;
+  if (!Number.isFinite(delta) || delta <= 0) return entry;
+  const dir = String(pos?.direction || "LONG").toUpperCase() === "SHORT" ? "SHORT" : "LONG";
+  return dir === "LONG" ? (entry + delta) : (entry - delta);
+}
+
+
 export function applyTP(pos, price) {
   if (pos.status === "CLOSED") return { changed: false };
   if (pos.status === "PENDING_ENTRY" || pos.status === "EXPIRED") return { changed: false };
@@ -27,8 +40,8 @@ export function applyTP(pos, price) {
     pos.hitTP1 = true;
     pos.tpHitMax = Math.max(ensureTpHitMax(pos), 1);
     pos.status = STATUS.RUNNING;
-    // move SL to BE (LOCKED)
-    pos.slCurrent = Number(pos.levels.entryMid);
+    // move SL to BE ± 0.10R (LOCKED)
+    pos.slCurrent = beOffsetSL(pos);
     pos.slMode = "BE";
     return { changed: true, event: "TP1" };
   }

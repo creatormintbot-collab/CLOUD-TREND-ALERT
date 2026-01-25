@@ -162,9 +162,21 @@ export class StateRepo {
     const raw = String(symbolOrKey || "").trim();
     if (!raw) return "";
     if (!raw.includes("|")) return raw.toUpperCase();
-    const [sym, tf] = raw.split("|");
-    return `${String(sym || "").toUpperCase()}|${String(tf || "").toLowerCase()}`;
+
+    const parts = raw.split("|").map((p) => String(p || "").trim()).filter(Boolean);
+    if (parts.length === 0) return "";
+
+    const sym = parts[0].toUpperCase();
+    const rest = parts.slice(1).map((p) => {
+      const s = String(p || "").trim();
+      // normalize timeframe tokens to lowercase; keep other tokens uppercase
+      const isTf = /^[0-9]+[mhdw]$/i.test(s) || s.toLowerCase() === "1h" || s.toLowerCase() === "4h";
+      return isTf ? s.toLowerCase() : s.toUpperCase();
+    });
+
+    return [sym, ...rest].join("|");
   }
+
 
   canSendPairTf(symbol, tf, cooldownMinutes) {
     return this.canSendSymbol(`${symbol}|${tf}`, cooldownMinutes);
@@ -173,6 +185,44 @@ export class StateRepo {
   markSentPairTf(symbol, tf) {
     return this.markSent(`${symbol}|${tf}`);
   }
+
+  // New (LOCK): cooldown keys scoped by pair+side (+ optional playbook).
+  canSendPairSide(symbol, direction, cooldownMinutes) {
+    return this.canSendSymbol(`${symbol}|${direction}`, cooldownMinutes);
+  }
+
+  markSentPairSide(symbol, direction) {
+    return this.markSent(`${symbol}|${direction}`);
+  }
+
+  canSendPairSidePlaybook(symbol, direction, playbook, cooldownMinutes) {
+    return this.canSendSymbol(`${symbol}|${direction}|${playbook}`, cooldownMinutes);
+  }
+
+  markSentPairSidePlaybook(symbol, direction, playbook) {
+    return this.markSent(`${symbol}|${direction}|${playbook}`);
+  }
+
+  canSendSignal(signal, cooldownMinutes) {
+    const sym = String(signal?.symbol || '').toUpperCase();
+    const dir = String(signal?.direction || '').toUpperCase();
+    const pb = String(signal?.playbook || '').toUpperCase();
+    if (!sym || !dir) return this.canSendSymbol(sym, cooldownMinutes);
+    // Ideal: per pair-per-side-per-playbook when playbook is known.
+    if (pb) return this.canSendPairSidePlaybook(sym, dir, pb, cooldownMinutes);
+    return this.canSendPairSide(sym, dir, cooldownMinutes);
+  }
+
+  markSentSignal(signal) {
+    const sym = String(signal?.symbol || '').toUpperCase();
+    const dir = String(signal?.direction || '').toUpperCase();
+    const pb = String(signal?.playbook || '').toUpperCase();
+    if (!sym || !dir) return this.markSent(sym);
+    if (pb) return this.markSentPairSidePlaybook(sym, dir, pb);
+    return this.markSentPairSide(sym, dir);
+
+  }
+
 
   canSendSymbol(symbolOrKey, cooldownMinutes) {
     const k = this._normSentKey(symbolOrKey);

@@ -77,6 +77,11 @@ export const env = {
   MAX_SIGNALS_PER_DAY: num(process.env.MAX_SIGNALS_PER_DAY, 5),
   COOLDOWN_MINUTES: num(process.env.COOLDOWN_MINUTES, 120),
 
+
+  // AUTO rolling cooldowns (optional; default keeps existing behavior)
+  AUTO_COOLDOWN_MINUTES: num(process.env.AUTO_COOLDOWN_MINUTES, 720),
+  AUTO_PAIR_TF_COOLDOWN_MINUTES: num(process.env.AUTO_PAIR_TF_COOLDOWN_MINUTES, 720),
+
   ZONE_ATR_MULT: num(process.env.ZONE_ATR_MULT, 0.15),
   SL_ATR_MULT: num(process.env.SL_ATR_MULT, 1.6), // LOCKED validate
   ADX_MIN: num(process.env.ADX_MIN, 18),

@@ -1,13 +1,40 @@
 import { fmtPrice } from "../../utils/format.js";
 
+
+function resolvePlaybook(obj = {}) {
+  const pb = String(obj?.playbook || "").toUpperCase();
+  if (pb === "INTRADAY" || pb === "SWING") return pb;
+  const tf = String(obj?.tf || obj?.timeframe || "").toLowerCase();
+  if (tf === "4h") return "SWING";
+  return "INTRADAY";
+}
+
+function modeLabel(playbook) {
+  return playbook === "SWING" ? "Swing" : "Intraday";
+}
+
+function confluenceActive(obj = {}) {
+  if (obj?.confluence === true || obj?.isConfluence === true) return true;
+  const tfs = obj?.confluenceTfs || obj?.confluenceTFs || obj?.confluenceTimeframes;
+  if (Array.isArray(tfs) && tfs.length >= 2) return true;
+  const tag = obj?.tag || obj?.tags || obj?.label;
+  if (typeof tag === "string" && tag.toLowerCase().includes("confluence")) return true;
+  return false;
+}
+
+
 export function entryHitCard(pos, price) {
   const dirEmoji = pos.direction === "LONG" ? "🟢" : "🔴";
+  const pb = resolvePlaybook(pos);
+  const conf = confluenceActive(pos);
   return [
     "CLOUD TREND ALERT",
     "━━━━━━━━━━━━━━━━━━",
     `✅ ENTRY CONFIRMED — ${dirEmoji} ${pos.direction}`,
     `🪙 Pair: ${pos.symbol}`,
-    `⏱ Timeframe: ${pos.tf}`,
+    `Mode: ${modeLabel(pb)}`,
+    `Signal TF: ${pos.tf}`,
+    conf ? `Confluence: Intraday + Swing` : null,
     "",
     `🎯 Fill Price: ${fmtPrice(price)}`,
     "",
@@ -19,6 +46,10 @@ export function entryCard(s) {
   const dirRaw = String(s?.direction || s?.side || s?.signal || "LONG").toUpperCase();
   const dir = dirRaw === "SHORT" ? "SHORT" : "LONG";
   const dot = dir === "LONG" ? "🟢" : "🔴";
+
+
+  const pb = resolvePlaybook(s);
+  const conf = confluenceActive(s);
 
   const sym = s?.symbol || s?.pair || "N/A";
   const tf = s?.tf || s?.timeframe || "N/A";
@@ -86,7 +117,9 @@ export function entryCard(s) {
     "────────────────────────────────",
     `🚀 FUTURES SIGNAL — ${dot} ${dir}`,
     `🌕 Pair: ${sym}`,
-    `⏱ Timeframe: ${tf}`,
+    `Mode: ${modeLabel(pb)}`,
+    `Signal TF: ${tf}`,
+    conf ? `Confluence: Intraday + Swing` : null,
     "",
     "🎯 Entry Zone:",
     `${fmt(entryLow)} – ${fmt(entryHigh)}`,

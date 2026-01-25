@@ -36,6 +36,20 @@ function clampNum(x, lo, hi) {
   return Math.min(hi, Math.max(lo, n));
 }
 
+function normTf(tf) {
+  return String(tf || "").trim().toLowerCase();
+}
+
+function isSwingTf(tf, env) {
+  const swing = normTf(env?.SECONDARY_TIMEFRAME || "4h");
+  return normTf(tf) === swing;
+}
+
+function playbookForTf(tf, env) {
+  return isSwingTf(tf, env) ? "SWING" : "INTRADAY";
+}
+
+
 function scoreLabelFromScore(score) {
   const s = Number(score);
   if (s >= 90) return "ELITE";
@@ -123,7 +137,7 @@ function ichimokuCompass(candles, opts = {}) {
 }
 
 
-function levelsFromATR({ direction, entryMid, atrVal, zoneMult, slMult }) {
+function levelsFromATR({ direction, entryMid, atrVal, zoneMult, slMult, tpRMults = null }) {
   const zoneSize = atrVal * zoneMult;
   const entryLow = entryMid - zoneSize;
   const entryHigh = entryMid + zoneSize;
@@ -131,11 +145,20 @@ function levelsFromATR({ direction, entryMid, atrVal, zoneMult, slMult }) {
   const slDist = atrVal * slMult;
   const sl = direction === "LONG" ? entryMid - slDist : entryMid + slDist;
 
-  const tp1 = direction === "LONG" ? entryMid + slDist * 1.2 : entryMid - slDist * 1.2;
-  const tp2 = direction === "LONG" ? entryMid + slDist * 2.0 : entryMid - slDist * 2.0;
-  const tp3 = direction === "LONG" ? entryMid + slDist * 3.0 : entryMid - slDist * 3.0;
+  // R is defined as |Entry - SL| (LOCK). Keep SL logic as-is, only adjust TP R-multipliers by playbook.
+  const R = Math.abs(entryMid - sl);
 
-  return { entryLow, entryHigh, entryMid, sl, tp1, tp2, tp3, slDist };
+  // Backward-compatible defaults (legacy behaviour) if tpRMults is not provided.
+  const m1 = Number(tpRMults?.[0] ?? 1.2);
+  const m2 = Number(tpRMults?.[1] ?? 2.0);
+  const m3 = Number(tpRMults?.[2] ?? 3.0);
+
+  const sgn = direction === "LONG" ? 1 : -1;
+  const tp1 = entryMid + sgn * R * m1;
+  const tp2 = entryMid + sgn * R * m2;
+  const tp3 = entryMid + sgn * R * m3;
+
+  return { entryLow, entryHigh, entryMid, sl, tp1, tp2, tp3, slDist, R, tpRMults: [m1, m2, m3] };
 }
 
 function pickTrendTf(entryTf, thresholds, env) {
@@ -477,12 +500,17 @@ export function evaluateSignal({ symbol, tf, klines, thresholds, env = {}, isAut
   if (!trig.ok) return { ok: false };
 
   const entryMid = core.close;
+
+  const playbook = playbookForTf(tf, env);
+  const tpRMults = playbook === "SWING" ? [1.0, 1.5, 2.0] : [1.0, 1.4, 1.8];
+
   const lv = levelsFromATR({
     direction: core.direction,
     entryMid,
     atrVal: core.ind.atr14,
     zoneMult: thresholds.ZONE_ATR_MULT,
-    slMult: thresholds.SL_ATR_MULT
+    slMult: thresholds.SL_ATR_MULT,
+    tpRMults
   });
 
   const scoreRaw = Number(core.fin.total || 0);
@@ -512,6 +540,9 @@ export function evaluateSignal({ symbol, tf, klines, thresholds, env = {}, isAut
     ok: true,
     tf,
     symbol,
+    playbook,
+    r: lv.R,
+
         direction: core.direction,
     candleCloseTime: core.last.closeTime,
     score,

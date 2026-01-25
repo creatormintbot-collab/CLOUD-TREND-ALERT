@@ -22,6 +22,37 @@ function tfLine(tfObj, fallbackObj) {
   return `15m: ${v("15m")} | 30m: ${v("30m")} | 1h: ${v("1h")} | 4h: ${v("4h")}`;
 }
 
+function playbookBreakdown(x = {}, tfObj = null) {
+  const pbObj =
+    (x.playbookBreakdownCreated && typeof x.playbookBreakdownCreated === "object" ? x.playbookBreakdownCreated : null) ||
+    (x.modeBreakdownCreated && typeof x.modeBreakdownCreated === "object" ? x.modeBreakdownCreated : null) ||
+    null;
+
+  if (pbObj) {
+    const intraday = num(pbObj.INTRADAY ?? pbObj.intraday, 0);
+    const swing = num(pbObj.SWING ?? pbObj.swing, 0);
+    return { intraday, swing };
+  }
+
+  // Optional direct fields
+  if (x.intradayCreated !== undefined || x.swingCreated !== undefined) {
+    return { intraday: num(x.intradayCreated, 0), swing: num(x.swingCreated, 0) };
+  }
+
+  const tf = tfObj && typeof tfObj === "object" ? tfObj : null;
+  if (tf) {
+    const intraday = num(tf["15m"], 0) + num(tf["30m"], 0) + num(tf["1h"], 0);
+    const swing = num(tf["4h"], 0);
+    return { intraday, swing };
+  }
+
+  return { intraday: 0, swing: 0 };
+}
+
+function pbLine(intraday, swing, label = "Signals Created") {
+  return `[INTRADAY] ${label}: ${intraday} | [SWING] ${label}: ${swing}`;
+}
+
 function pct(a, b) {
   const A = Number(a);
   const B = Number(b);
@@ -53,6 +84,8 @@ export function recapCard(x = {}) {
   const tfBreakdownCreated = x.tfBreakdownCreated || x.tfBreakdownSent || x.tfBreakdownSignals || null;
   const tfBreakdownLegacy = x.tfBreakdown || { "15m": 0, "30m": 0, "1h": 0, "4h": 0 };
 
+
+  const pbCounts = playbookBreakdown(x, tfBreakdownCreated || tfBreakdownLegacy);
   // Signal quality (optional, backwards-compatible)
   const topScore = (x.topScore !== undefined) ? fmtScore(x.topScore) : null;
   const avgScore = (x.avgScore !== undefined) ? Number(num(x.avgScore, 0)).toFixed(2) : null;
@@ -78,6 +111,8 @@ export function recapCard(x = {}) {
   const winrateStrict = pct(win, closedTrades);
   const directSlRate = pct(directSl, closedTrades);
 
+
+  const resultsByPlaybook = (x.resultsByPlaybook && typeof x.resultsByPlaybook === "object") ? x.resultsByPlaybook : null;
   // Cohort (Created Today) — Progress (optional)
   const cohortCreated = num(x.cohortCreated, 0);
   const cohortClosed = num(x.cohortClosedSoFar, num(x.cohortClosed, 0));
@@ -110,6 +145,9 @@ export function recapCard(x = {}) {
     "",
     "⏱ Timeframe Breakdown (Signals Created)",
     tfLine(tfBreakdownCreated, tfBreakdownLegacy),
+    "",
+    "🧭 Mode Breakdown (Signals Created)",
+    pbLine(pbCounts.intraday, pbCounts.swing),
   ];
 
   if (topScore !== null && avgScore !== null) {
@@ -142,6 +180,16 @@ export function recapCard(x = {}) {
   lines.push("📈 Rates (Closed Today)");
   lines.push(`• Winrate (strict): ${winrateStrict}%`);
   lines.push(`• Direct SL Rate: ${directSlRate}%`);
+
+if (resultsByPlaybook) {
+  const i = resultsByPlaybook.INTRADAY || resultsByPlaybook.intraday || {};
+  const w = resultsByPlaybook.SWING || resultsByPlaybook.swing || {};
+  lines.push("");
+  lines.push("🧭 Results by Mode (Closed Today)");
+  lines.push(`[INTRADAY] Closed: ${num(i.closed, 0)} | WIN(≥TP1): ${num(i.win, 0)} | Direct SL: ${num(i.directSl, 0)}`);
+  lines.push(`[SWING] Closed: ${num(w.closed, 0)} | WIN(≥TP1): ${num(w.win, 0)} | Direct SL: ${num(w.directSl, 0)}`);
+}
+
 
   lines.push("");
   lines.push("🧪 Cohort (Created Today) — Progress");

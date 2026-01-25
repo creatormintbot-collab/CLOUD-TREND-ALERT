@@ -2,6 +2,16 @@ import { evaluateSignal, explainSignal } from "../strategy/signalEngine.js";
 import { macdGate } from "../strategy/scoring/proScore.js";
 import { macd } from "../strategy/indicators/macd.js";
 
+
+function normTf(tf) {
+  return String(tf || "").trim().toLowerCase();
+}
+
+function isSwingTf(tf, env) {
+  const swing = normTf(env?.SECONDARY_TIMEFRAME || "4h");
+  return normTf(tf) === swing;
+}
+
 export class Pipeline {
   constructor({ universe, klines, ranker, thresholds, stateRepo, rotationRepo, env }) {
     this.universe = universe;
@@ -103,6 +113,158 @@ export class Pipeline {
     });
     return r?.ok ? r : null;
   }
+
+  // Dual Playbook scan for a single pair (LOCKED):
+  // - INTRADAY: best of 15m/30m/1h
+  // - SWING: 4h (SECONDARY_TIMEFRAME)
+  // Returns { primary, secondary } where primary is preferred (SWING when available).
+  async scanPairDual(symbol) {
+    const swingTf = String(this.env?.SECONDARY_TIMEFRAME || "4h");
+    const all = this._scanTimeframes();
+
+    const intradayTfs = all.filter((t) => !isSwingTf(t, this.env));
+    const resultsIntraday = [];
+    for (const tf of intradayTfs) {
+      const r = evaluateSignal({
+        symbol,
+        tf,
+        klines: this.klines,
+        thresholds: this.thresholds,
+        env: this.env,
+        isAuto: false
+      });
+      if (r?.ok) resultsIntraday.push(r);
+    }
+
+    resultsIntraday.sort((a, b) => b.score - a.score);
+    const topIntraday = resultsIntraday[0] || null;
+
+    let topSwing = null;
+    {
+      const r = evaluateSignal({
+        symbol,
+        tf: swingTf,
+        klines: this.klines,
+        thresholds: this.thresholds,
+        env: this.env,
+        isAuto: false
+      });
+      if (r?.ok) {
+        // 4h publish rule for /scan (LOCKED)
+        if (String(r.tf).toLowerCase() === String(this.env.SECONDARY_TIMEFRAME || "4h").toLowerCase()) {
+          if (String(symbol).toUpperCase() !== "ETHUSDT" && r.score < this.env.SECONDARY_MIN_SCORE) {
+            topSwing = null;
+          } else {
+            topSwing = r;
+          }
+        } else {
+          topSwing = r;
+        }
+      }
+    }
+
+    if (!topSwing && !topIntraday) return { primary: null, secondary: null };
+
+    // Same pair rules (LOCKED):
+    // - If both playbooks align direction => send 1 card (prefer SWING) with confluence tag.
+    // - If both exist but opposite direction => do NOT send two directions; prefer SWING only.
+    if (topSwing && topIntraday) {
+      if (String(topSwing.direction) === String(topIntraday.direction)) {
+        topSwing.confluence = "INTRADAY+SWING";
+        topSwing.confluenceTfs = [topIntraday.tf, topSwing.tf];
+        return { primary: topSwing, secondary: null };
+      }
+      return { primary: topSwing, secondary: null };
+    }
+
+    return topSwing
+      ? { primary: topSwing, secondary: null }
+      : { primary: topIntraday, secondary: null };
+  }
+
+  // /scan default (LOCKED): find best INTRADAY + best SWING across universe.
+  // Output ideal: max 2 signals (Top 1 Intraday + Top 1 Swing), with guardrails.
+  async scanBestDual() {
+    const symbols = (this.universe.symbolsForScan?.() || this.universe.symbols?.() || []);
+    const all = this._scanTimeframes();
+    const swingTf = String(this.env?.SECONDARY_TIMEFRAME || "4h");
+    const intradayTfs = all.filter((t) => !isSwingTf(t, this.env));
+
+    const topN = Number(this.env?.TOP10_PER_TF ?? 10);
+
+    const intradayCandidates = [];
+    for (const tf of intradayTfs) {
+      const shortlist = symbols
+        .map((s) => ({ symbol: s, tf, fast: this.ranker.fastScore(s, tf, this.thresholds) }))
+        .sort((a, b) => b.fast - a.fast)
+        .slice(0, topN);
+
+      for (const row of shortlist) {
+        if (row.fast <= 0) continue;
+        const r = evaluateSignal({
+          symbol: row.symbol,
+          tf: row.tf,
+          klines: this.klines,
+          thresholds: this.thresholds,
+          env: this.env,
+          isAuto: false
+        });
+        if (r?.ok) intradayCandidates.push(r);
+      }
+    }
+
+    const swingCandidates = [];
+    {
+      const shortlist = symbols
+        .map((s) => ({ symbol: s, tf: swingTf, fast: this.ranker.fastScore(s, swingTf, this.thresholds) }))
+        .sort((a, b) => b.fast - a.fast)
+        .slice(0, topN);
+
+      for (const row of shortlist) {
+        if (row.fast <= 0) continue;
+        const r = evaluateSignal({
+          symbol: row.symbol,
+          tf: swingTf,
+          klines: this.klines,
+          thresholds: this.thresholds,
+          env: this.env,
+          isAuto: false
+        });
+        if (!r?.ok) continue;
+        // 4h publish rule for /scan (LOCKED)
+        if (String(r.symbol).toUpperCase() !== "ETHUSDT" && r.score < this.env.SECONDARY_MIN_SCORE) continue;
+        swingCandidates.push(r);
+      }
+    }
+
+    intradayCandidates.sort((a, b) => b.score - a.score);
+    swingCandidates.sort((a, b) => b.score - a.score);
+
+    const topIntraday = intradayCandidates[0] || null;
+    const topSwing = swingCandidates[0] || null;
+
+    if (!topSwing && !topIntraday) return { primary: null, secondary: null };
+
+    // Prefer SWING as primary when available.
+    if (topSwing && !topIntraday) return { primary: topSwing, secondary: null };
+    if (!topSwing && topIntraday) return { primary: topIntraday, secondary: null };
+
+    // Guardrail: if same pair
+    if (String(topSwing.symbol) === String(topIntraday.symbol)) {
+      if (String(topSwing.direction) === String(topIntraday.direction)) {
+        topSwing.confluence = "INTRADAY+SWING";
+        topSwing.confluenceTfs = [topIntraday.tf, topSwing.tf];
+        return { primary: topSwing, secondary: null };
+      }
+
+      // Same pair but opposite direction => pick another intraday candidate (different symbol).
+      const alt = intradayCandidates.find((c) => String(c.symbol) !== String(topSwing.symbol));
+      return { primary: topSwing, secondary: alt || null };
+    }
+
+    return { primary: topSwing, secondary: topIntraday };
+  }
+
 
   explainPair(symbol) {
     const tfs = this._scanTimeframes();

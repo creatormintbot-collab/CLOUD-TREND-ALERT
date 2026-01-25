@@ -54,6 +54,7 @@ function entryHitCardText(pos, price) {
 
   const tf = pos?.tf || "N/A";
   const sym = pos?.symbol || "N/A";
+  const mode = String(pos?.playbook || "INTRADAY").toUpperCase() === "SWING" ? "Swing" : "Intraday";
 
   const low = pos?.levels?.entryLow;
   const high = pos?.levels?.entryHigh;
@@ -75,7 +76,8 @@ function entryHitCardText(pos, price) {
     "────────────────────────────────",
     `✅ ENTRY CONFIRMED — ${dot} ${dir}`,
     `🌕 Pair: ${sym}`,
-    `⏱ Timeframe: ${tf}`,
+    `⏱ Signal TF: ${tf}`,
+    `🧭 Mode: ${mode}`,
     "",
     "🎯 Entry Zone:",
     `${fmt(low)} – ${fmt(high)}`,

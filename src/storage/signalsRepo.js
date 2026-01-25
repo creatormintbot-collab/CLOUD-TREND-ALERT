@@ -14,6 +14,12 @@ function prevUtcDayKey(dayKey) {
     return utcDateKey(d);
   }
 }
+
+
+function derivePlaybookFromTf(tf) {
+  const t = String(tf || "").toLowerCase();
+  return t === "4h" ? "SWING" : "INTRADAY";
+}
 import { readJson, writeJsonAtomic } from "./jsonStore.js";
 
 export class SignalsRepo {
@@ -63,6 +69,9 @@ export class SignalsRepo {
         symbol: signal.symbol,
         tf: signal.tf,
         direction: signal.direction,
+        playbook: signal.playbook || derivePlaybookFromTf(signal.tf),
+        confluence: signal.confluence || null,
+        confluenceTfs: Array.isArray(signal.confluenceTfs) ? signal.confluenceTfs : null,
         score: Math.round(signal.score || 0),
         scoreLabel: signal.scoreLabel || "",
         candleCloseTime: signal.candleCloseTime,
@@ -98,6 +107,7 @@ export class SignalsRepo {
         symbol: pos.symbol,
         tf: pos.tf,
         direction: pos.direction,
+        playbook: pos.playbook || derivePlaybookFromTf(pos.tf),
         price: Number(price ?? 0),
         hit: { tp1: !!pos.hitTP1, tp2: !!pos.hitTP2, tp3: !!pos.hitTP3 },
         status: pos.status,
@@ -236,6 +246,7 @@ export class SignalsRepo {
       scanSignalsSent: 0,
       totalSignalsSent: 0,
       tfBreakdownSent: { "15m": 0, "30m": 0, "1h": 0, "4h": 0 },
+      playbookBreakdownSent: { INTRADAY: 0, SWING: 0 },
       // optional breakdowns (non-breaking)
       scanNoSignal: 0,
       scanTimeout: 0,
@@ -256,6 +267,8 @@ export class SignalsRepo {
 
         const tf = String(ev.tf || "").toLowerCase();
         if (stats.tfBreakdownSent[tf] !== undefined) stats.tfBreakdownSent[tf]++;
+        const pb = String(ev.playbook || "").toUpperCase();
+        if (stats.playbookBreakdownSent[pb] !== undefined) stats.playbookBreakdownSent[pb]++;
         stats.totalSignalsSent++;
         continue;
       }

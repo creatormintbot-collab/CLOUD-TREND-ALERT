@@ -18,6 +18,7 @@ export function createPositionFromSignal(
     symbol: signal.symbol,
     tf: signal.tf,
     direction: signal.direction,
+    playbook: signal.playbook || (String(signal.tf || '').toLowerCase() === '4h' ? 'SWING' : 'INTRADAY'),
     createdAt: Date.now(),
     candleCloseTime: signal.candleCloseTime,
 
