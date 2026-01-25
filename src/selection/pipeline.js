@@ -172,7 +172,10 @@ export class Pipeline {
       if (String(topSwing.direction) === String(topIntraday.direction)) {
         topSwing.confluence = "INTRADAY+SWING";
         topSwing.confluenceTfs = [topIntraday.tf, topSwing.tf];
-        return { primary: topSwing, secondary: null };
+        // Keep intraday as secondary for fallback when Swing is duplicate (LOCK).
+        topIntraday.confluence = "INTRADAY+SWING";
+        topIntraday.confluenceTfs = [topIntraday.tf, topSwing.tf];
+        return { primary: topSwing, secondary: topIntraday };
       }
       return { primary: topSwing, secondary: null };
     }
@@ -254,7 +257,10 @@ export class Pipeline {
       if (String(topSwing.direction) === String(topIntraday.direction)) {
         topSwing.confluence = "INTRADAY+SWING";
         topSwing.confluenceTfs = [topIntraday.tf, topSwing.tf];
-        return { primary: topSwing, secondary: null };
+        // Keep intraday as secondary for fallback when Swing is duplicate (LOCK).
+        topIntraday.confluence = "INTRADAY+SWING";
+        topIntraday.confluenceTfs = [topIntraday.tf, topSwing.tf];
+        return { primary: topSwing, secondary: topIntraday };
       }
 
       // Same pair but opposite direction => pick another intraday candidate (different symbol).

@@ -736,7 +736,7 @@ export class Commands {
 
       const startedAt = Date.now();
       let out = null;
-      let secondaryRes = null;
+      let secondaryPick = null;
 
 
       // Rotation mode keeps Progress UI (single edited message).
@@ -744,7 +744,7 @@ export class Commands {
         out = await this.progressUi.run({ chatId, userId }, async () => {
           const dual = await this.pipeline.scanBestDual();
           const primary = dual?.primary || null;
-          secondaryRes = dual?.secondary || null;
+          secondaryPick = dual?.secondary || null;
           symbolUsed = primary?.symbol || null;
           return primary;
         });
@@ -760,7 +760,7 @@ export class Commands {
             // LOCKED: /scan (pair only) returns best INTRADAY + SWING (4h), max 2 cards.
             const dual = await this.pipeline.scanPairDual(symbolArg);
             res = dual?.primary || null;
-            secondaryRes = dual?.secondary || null;
+            secondaryPick = dual?.secondary || null;
           } else {
             symbolUsed = symbolArg;
             res = await this.pipeline.scanPairTf(symbolArg, tfArg);
@@ -867,7 +867,7 @@ export class Commands {
 
       if (out.kind !== "OK") return;
 
-      const res = out.result;
+      let res = out.result;
 
       if (!res || !res.ok || res.score < 70 || res.scoreLabel === "NO SIGNAL") {
         await this.signalsRepo.logScanNoSignal({
@@ -893,7 +893,100 @@ export class Commands {
       }
 
 
-      // Prevent duplicate active signals (same Pair + Timeframe)
+      // LOCK: normalize playbook + guardrails for dual picks (Intraday vs Swing)
+      const secTf = String(this.env?.SECONDARY_TIMEFRAME || "4h").toLowerCase();
+      const inferPlaybook = (sig) => {
+        const tf = String(sig?.tf || "").toLowerCase();
+        return tf === secTf ? "SWING" : "INTRADAY";
+      };
+      const normSym = (s) => String(s || "").toUpperCase();
+      const normDir = (d) => {
+        const x = String(d || "").toUpperCase();
+        if (!x) return "";
+        if (x.startsWith("LONG") || x === "L") return "LONG";
+        if (x.startsWith("SHORT") || x === "S") return "SHORT";
+        return x;
+      };
+      const scanLog = (evt, obj) => {
+        try {
+          console.info("[SCAN]", evt, JSON.stringify(obj || {}));
+        } catch {
+          console.info("[SCAN]", evt);
+        }
+      };
+
+      // Ensure required field is persisted (LOCK)
+      try {
+        if (res && typeof res === "object" && !res.playbook) res.playbook = inferPlaybook(res);
+        if (secondaryPick && typeof secondaryPick === "object" && secondaryPick.ok && !secondaryPick.playbook) {
+          secondaryPick.playbook = inferPlaybook(secondaryPick);
+        }
+      } catch {}
+
+      // Guardrails + confluence shaping (LOCK)
+      let onlyOneCard = false;
+      try {
+        if (secondaryPick && secondaryPick.ok) {
+          const pSym0 = normSym(res?.symbol);
+          const sSym0 = normSym(secondaryPick?.symbol);
+          const pDir0 = normDir(res?.direction);
+          const sDir0 = normDir(secondaryPick?.direction);
+
+          const pPb0 = String(res?.playbook || inferPlaybook(res)).toUpperCase();
+          const sPb0 = String(secondaryPick?.playbook || inferPlaybook(secondaryPick)).toUpperCase();
+
+          scanLog("candidates", {
+            primary: { symbol: pSym0, tf: String(res?.tf || ""), dir: pDir0, playbook: pPb0, score: Math.round(res?.score || 0) },
+            secondary: { symbol: sSym0, tf: String(secondaryPick?.tf || ""), dir: sDir0, playbook: sPb0, score: Math.round(secondaryPick?.score || 0) }
+          });
+
+          if (pSym0 && sSym0 && pSym0 === sSym0) {
+            onlyOneCard = true; // same pair => max 1 card (LOCK)
+            const isSwingP = pPb0 === "SWING";
+            const isSwingS = sPb0 === "SWING";
+
+            // Prefer Swing (LOCK). Keep the other as fallback if Swing is duplicate.
+            if (!isSwingP && isSwingS) {
+              const tmp = res;
+              res = secondaryPick;
+              secondaryPick = tmp;
+            }
+
+            const pSym = normSym(res?.symbol);
+            const sSym = normSym(secondaryPick?.symbol);
+            const pDir = normDir(res?.direction);
+            const sDir = normDir(secondaryPick?.direction);
+
+            const intraTf = String(secondaryPick?.tf || "");
+            const swingTf = String(res?.tf || "");
+
+            if (pSym && sSym && pSym === sSym && pDir && sDir && pDir === sDir) {
+              // Confluence: same pair + same direction across playbooks
+              res.confluence = "INTRADAY + SWING";
+              res.confluenceTfs = [intraTf, swingTf].filter(Boolean);
+              secondaryPick.confluence = "INTRADAY + SWING";
+              secondaryPick.confluenceTfs = [intraTf, swingTf].filter(Boolean);
+
+              scanLog("guardrail_confluence", { symbol: pSym, direction: pDir, prefer: "SWING" });
+            } else {
+              // Same pair but opposite direction => never send two directions (LOCK).
+              scanLog("guardrail_same_pair_opposite_dir", { symbol: pSym, primaryDir: pDir, secondaryDir: sDir, prefer: "SWING" });
+              // LOCK: never fallback to opposite-direction candidate on the same pair.
+              secondaryPick = null;
+            }
+          }
+        } else if (res) {
+          scanLog("candidates", {
+            primary: { symbol: normSym(res?.symbol), tf: String(res?.tf || ""), dir: normDir(res?.direction), playbook: String(res?.playbook || inferPlaybook(res)).toUpperCase(), score: Math.round(res?.score || 0) }
+          });
+        }
+      } catch {}
+
+      let primarySent = false;
+      let secondarySent = false;
+      let primaryDuplicatePos = null;
+
+      // Prevent duplicate active signals (same Pair + Timeframe) — primary pick
       try {
         const existing =
           (typeof this.positionsRepo.findActiveBySymbolTf === "function"
@@ -910,21 +1003,20 @@ export class Commands {
             : null);
 
         if (existing) {
-          await this.signalsRepo.logScanThrottled({
-            chatId,
-            query: { symbol: symbolUsed || null, tf: res.tf || null, raw: raw || "" },
-            meta: { reason: "DUPLICATE_ACTIVE" }
-          });
+          primaryDuplicatePos = existing;
 
-          await this.sender.sendText(chatId, formatDuplicateNotice({
-            symbol: res.symbol,
-            tf: res.tf,
-            pos: existing
-          }));
-          return;
+          scanLog("duplicate_primary", { symbol: normSym(res.symbol), tf: String(res.tf || ""), playbook: String(res.playbook || "") });
         }
       } catch {}
 
+
+      if (primaryDuplicatePos) {
+        scanLog("primary_blocked_duplicate", {
+          symbol: normSym(res?.symbol),
+          tf: String(res?.tf || ""),
+          playbook: String(res?.playbook || inferPlaybook(res)).toUpperCase()
+        });
+      } else {
       // chart FIRST (ENTRY only)
       const overlays = buildOverlays(res);
       const png = await renderEntryChart(res, overlays);
@@ -964,56 +1056,54 @@ export class Commands {
 
       this.positionsRepo.upsert(pos);
       await this.positionsRepo.flush();
+      primarySent = true;
+      }
 
       // Optional secondary card for /scan default (LOCKED): Top 1 Swing + Top 1 Intraday
-      if (secondaryRes && secondaryRes.ok) {
+      if (secondaryPick && secondaryPick.ok && (!onlyOneCard || !primarySent)) {
         // Prevent duplicate active signals (same Pair + Timeframe)
         try {
           const existing =
             (typeof this.positionsRepo.findActiveBySymbolTf === "function"
-              ? this.positionsRepo.findActiveBySymbolTf(secondaryRes.symbol, secondaryRes.tf)
+              ? this.positionsRepo.findActiveBySymbolTf(secondaryPick.symbol, secondaryPick.tf)
               : null) ||
             (Array.isArray(this.positionsRepo.listActive?.())
               ? this.positionsRepo.listActive().find((p) =>
                   p &&
                   p.status !== "CLOSED" &&
                   p.status !== "EXPIRED" &&
-                  String(p.symbol || "").toUpperCase() === String(secondaryRes.symbol || "").toUpperCase() &&
-                  String(p.tf || "").toLowerCase() === String(secondaryRes.tf || "").toLowerCase()
+                  String(p.symbol || "").toUpperCase() === String(secondaryPick.symbol || "").toUpperCase() &&
+                  String(p.tf || "").toLowerCase() === String(secondaryPick.tf || "").toLowerCase()
                 )
               : null);
 
           if (existing) {
-            await this.signalsRepo.logScanThrottled({
-              chatId,
-              query: { symbol: secondaryRes.symbol || null, tf: secondaryRes.tf || null, raw: raw || "" },
-              meta: { reason: "DUPLICATE_ACTIVE_SECONDARY" }
-            });
+            scanLog("duplicate_secondary", { symbol: normSym(secondaryPick.symbol), tf: String(secondaryPick.tf || ""), playbook: String(secondaryPick.playbook || "") });
           } else {
             // chart FIRST (ENTRY only)
-            const overlays2 = buildOverlays(secondaryRes);
-            const png2 = await renderEntryChart(secondaryRes, overlays2);
+            const overlays2 = buildOverlays(secondaryPick);
+            const png2 = await renderEntryChart(secondaryPick, overlays2);
             await this.sender.sendPhoto(chatId, png2);
 
-            const entryMsg2 = await this.sender.sendText(chatId, entryCard(secondaryRes));
+            const entryMsg2 = await this.sender.sendText(chatId, entryCard(secondaryPick));
 
             // counters
             try {
-              if (typeof this.stateRepo.bumpScanSignalsSent === "function") this.stateRepo.bumpScanSignalsSent(secondaryRes.tf);
-              else this.stateRepo.bumpScan(secondaryRes.tf);
-              if (typeof this.stateRepo.markSentPairTf === "function") this.stateRepo.markSentPairTf(secondaryRes.symbol, secondaryRes.tf);
+              if (typeof this.stateRepo.bumpScanSignalsSent === "function") this.stateRepo.bumpScanSignalsSent(secondaryPick.tf);
+              else this.stateRepo.bumpScan(secondaryPick.tf);
+              if (typeof this.stateRepo.markSentPairTf === "function") this.stateRepo.markSentPairTf(secondaryPick.symbol, secondaryPick.tf);
               await this.stateRepo.flush();
             } catch {}
 
             // log entry
             await this.signalsRepo.logEntry({
               source: "SCAN",
-              signal: secondaryRes,
+              signal: secondaryPick,
               meta: { chatId: String(chatId), raw: raw || "" }
             });
 
             // create monitored position (notify only requester chat)
-            const pos2 = createPositionFromSignal(secondaryRes, {
+            const pos2 = createPositionFromSignal(secondaryPick, {
               source: "SCAN",
               notifyChatIds: [String(chatId)],
               telegram: entryMsg2?.message_id
@@ -1029,8 +1119,24 @@ export class Commands {
 
             this.positionsRepo.upsert(pos2);
             await this.positionsRepo.flush();
+            secondarySent = true;
           }
         } catch {}
+      }
+
+      // If primary was blocked by duplicate and no fallback was sent, show Duplicate Prevented (LOCK)
+      if (primaryDuplicatePos && !primarySent && !secondarySent) {
+        await this.signalsRepo.logScanThrottled({
+          chatId,
+          query: { symbol: symbolUsed || null, tf: res?.tf || null, raw: raw || "" },
+          meta: { reason: "DUPLICATE_ACTIVE_NO_FALLBACK" }
+        });
+
+        await this.sender.sendText(chatId, formatDuplicateNotice({
+          symbol: res.symbol,
+          tf: res.tf,
+          pos: primaryDuplicatePos
+        }));
       }
     });
   }
