@@ -448,13 +448,17 @@ export function evaluateSignal({ symbol, tf, klines, thresholds, env = {}, isAut
 
   const playbook = playbookForTf(tf, env);
   const useIchimoku = playbook === "SWING";
+  const useHtfGate = !(playbook === "INTRADAY" && !isAuto);
 
   // HTF permission layer (HARD GATE): LTF must not publish when HTF rejects.
-  const htfPerm = htfPermissionGate({ symbol, tf, klines, thresholds, env, isAuto });
-  if (!htfPerm.ok) return { ok: false };
+  let htfPerm = { ok: true };
+  if (useHtfGate) {
+    htfPerm = htfPermissionGate({ symbol, tf, klines, thresholds, env, isAuto });
+    if (!htfPerm.ok) return { ok: false };
+  }
 
   // Direction lock: if HTF has a clear direction, LTF must not contradict it.
-  if (htfPerm.htf?.direction && core.direction && htfPerm.htf.direction !== core.direction) return { ok: false };
+  if (useHtfGate && htfPerm.htf?.direction && core.direction && htfPerm.htf.direction !== core.direction) return { ok: false };
 
   const softMinAuto = Number(env?.CTA_SOFT_MIN_SCORE_AUTO ?? thresholds?.CTA_SOFT_MIN_SCORE_AUTO ?? thresholds?.AUTO_MIN_SCORE ?? 85);
   const softMinScan = Number(env?.CTA_SOFT_MIN_SCORE_SCAN ?? thresholds?.CTA_SOFT_MIN_SCORE_SCAN ?? 75);
@@ -592,6 +596,7 @@ export function explainSignal({ symbol, tf, klines, thresholds, env = {}, isAuto
 
   const playbook = playbookForTf(tf, env);
   const useIchimoku = playbook === "SWING";
+  const useHtfGate = !(playbook === "INTRADAY" && !isAuto);
 
   const softMinAuto = Number(env?.CTA_SOFT_MIN_SCORE_AUTO ?? thresholds?.CTA_SOFT_MIN_SCORE_AUTO ?? thresholds?.AUTO_MIN_SCORE ?? 85);
   const softMinScan = Number(env?.CTA_SOFT_MIN_SCORE_SCAN ?? thresholds?.CTA_SOFT_MIN_SCORE_SCAN ?? 75);
@@ -641,10 +646,11 @@ export function explainSignal({ symbol, tf, klines, thresholds, env = {}, isAuto
     Number(score || 0) < Number(secondaryMinScore);
 
   // Additional hard gates (reported as BLOCKED so /scan can show WATCHLIST-style output).
-  const htfPerm = htfPermissionGate({ symbol, tf, klines, thresholds, env, isAuto });
-  const htfBlocked = isValidSetup && !htfPerm.ok;
+  const htfPerm = useHtfGate ? htfPermissionGate({ symbol, tf, klines, thresholds, env, isAuto }) : { ok: true };
+  const htfBlocked = useHtfGate && isValidSetup && !htfPerm.ok;
 
   const htfDirMismatch =
+    useHtfGate &&
     isValidSetup &&
     !!htfPerm?.htf?.direction &&
     !!core.direction &&

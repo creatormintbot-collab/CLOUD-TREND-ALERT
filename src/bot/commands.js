@@ -690,6 +690,18 @@ export class Commands {
       const args = raw ? raw.split(/\s+/).filter(Boolean) : [];
       const symbolArg = args[0]?.toUpperCase();
       const tfArg = args[1]?.toLowerCase();
+      const activeSymbols = (() => {
+        try {
+          const list = Array.isArray(this.positionsRepo.listActive?.()) ? this.positionsRepo.listActive() : [];
+          const syms = list
+            .filter((p) => p && p.status !== "CLOSED" && p.status !== "EXPIRED")
+            .map((p) => String(p.symbol || "").toUpperCase())
+            .filter(Boolean);
+          return Array.from(new Set(syms));
+        } catch {
+          return [];
+        }
+      })();
 
       // Validate timeframe (avoid wasted work / silent failures)
       const allowedTfs = (() => {
@@ -742,7 +754,7 @@ export class Commands {
       // Rotation mode keeps Progress UI (single edited message).
       if (rotationMode) {
         out = await this.progressUi.run({ chatId, userId }, async () => {
-          const dual = await this.pipeline.scanBestDual();
+          const dual = await this.pipeline.scanBestDual({ excludeSymbols: activeSymbols });
           const primary = dual?.primary || null;
           secondaryPick = dual?.secondary || null;
           symbolUsed = primary?.symbol || null;
@@ -1018,7 +1030,8 @@ export class Commands {
       if (rotationMode && (!secondaryPick || samePairOpposite) && typeof this.pipeline.scanBestIntraday === "function") {
         try {
           const primarySym = res?.symbol;
-          const intr = await this.pipeline.scanBestIntraday({ excludeSymbols: [primarySym].filter(Boolean) });
+          const exclude = Array.from(new Set([...(activeSymbols || []), primarySym].filter(Boolean)));
+          const intr = await this.pipeline.scanBestIntraday({ excludeSymbols: exclude });
           const dup = intr?.ok ? findActiveDup(intr) : null;
           const ok = !!(intr?.ok && !dup);
 
@@ -1071,7 +1084,7 @@ export class Commands {
 if (rotationMode && primaryDuplicatePos) {
   const primarySym = res.symbol;
   const secondarySym = secondaryPick?.symbol || null;
-  const exclude = [primarySym, secondarySym].filter(Boolean);
+  const exclude = Array.from(new Set([...(activeSymbols || []), primarySym, secondarySym].filter(Boolean)));
 
   // If we already have a non-duplicate Intraday candidate, send it instead of blocking the scan.
   if (secondaryPick) {
@@ -1092,7 +1105,7 @@ if (rotationMode && primaryDuplicatePos) {
   // If still duplicate, try an Intraday-only fallback excluding the primary symbol (if supported).
   if (primaryDuplicatePos && typeof this.pipeline.scanBestIntraday === "function") {
     try {
-      const intr = await this.pipeline.scanBestIntraday({ excludeSymbols: [primarySym] });
+      const intr = await this.pipeline.scanBestIntraday({ excludeSymbols: exclude });
       if (intr?.ok && !findActiveDup(intr)) {
         scanLog("fallback_intraday_found", {
           symbol: intr.symbol,
