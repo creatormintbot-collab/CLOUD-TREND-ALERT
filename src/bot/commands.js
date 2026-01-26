@@ -1,5 +1,12 @@
 import { entryCard } from "./cards/entryCard.js";
-import { recapCard } from "./cards/recapCard.js";
+import {
+  statusCard,
+  statusOpenCard,
+  statusClosedCard,
+  cohortSummaryCard,
+  cohortDetailCard,
+  infoCard
+} from "./cards/statusCards.js";
 import { buildOverlays } from "../charts/layout.js";
 import { renderEntryChart } from "../charts/renderer.js";
 import { createPositionFromSignal } from "../positions/positionModel.js";
@@ -11,6 +18,12 @@ function utcTimeNow() {
   return new Date().toISOString().slice(11, 16);
 }
 
+const DAY_MS = 86400000;
+
+function utcDateKeyFromMs(ms) {
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
 function startOfUtcDayMs(dateKey) {
   const dk = String(dateKey || utcDateKeyNow());
   return Date.parse(dk + "T00:00:00.000Z");
@@ -20,6 +33,31 @@ function sameUtcDay(ts, dateKey) {
   const n = Number(ts);
   if (!Number.isFinite(n) || n <= 0) return false;
   return new Date(n).toISOString().slice(0, 10) === String(dateKey);
+}
+
+function parseDateKeyArg(raw) {
+  const s = String(raw || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+  const ms = Date.parse(`${s}T00:00:00.000Z`);
+  if (!Number.isFinite(ms)) return null;
+  if (utcDateKeyFromMs(ms) !== s) return null;
+  return s;
+}
+
+function recentUtcRange(endKey, days = 7) {
+  const endMs = startOfUtcDayMs(endKey);
+  if (!Number.isFinite(endMs)) return { keys: [], startKey: "", endKey: "" };
+  const keys = [];
+  for (let i = days - 1; i >= 0; i--) {
+    keys.push(utcDateKeyFromMs(endMs - i * DAY_MS));
+  }
+  return { keys, startKey: keys[0], endKey: keys[keys.length - 1] };
+}
+
+function yesterdayUtcKeyNow() {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
 }
 
 function compactNum(n) {
@@ -137,6 +175,30 @@ async function readSignalsDayStats(signalsRepo, dayKey) {
   }
 }
 
+async function resolveCreatedStats({ dateKey, stateRepo, signalsRepo }) {
+  const state = await readStateSnapshot(stateRepo);
+  const day = pickDayStats(state, dateKey) || {};
+  const sigStats = await readSignalsDayStats(signalsRepo, dateKey);
+
+  const autoSent = sigStats
+    ? Number(sigStats.autoSignalsSent || 0)
+    : (Number(day.autoSignalsSent ?? day.autoSent ?? day.autoTotal ?? 0) || 0);
+
+  const scanOk = sigStats
+    ? Number(sigStats.scanRequestsSuccess || 0)
+    : (Number(day.scanRequestsSuccess ?? day.scanRequestsOk ?? day.scanOk ?? day.scanRequests ?? day.scanTotal ?? 0) || 0);
+
+  const scanSignalsSent = sigStats
+    ? Number(sigStats.scanSignalsSent || 0)
+    : (Number(day.scanSignalsSent ?? day.scanSent ?? 0) || 0);
+
+  const totalCreated = sigStats
+    ? Number(sigStats.totalSignalsCreated || (autoSent + scanSignalsSent))
+    : (Number(day.totalSignalsCreated ?? day.totalSignalsSent ?? (autoSent + scanSignalsSent)) || 0);
+
+  return { autoSent, scanOk, scanSignalsSent, totalCreated, day };
+}
+
 function isActivePos(p) {
   const s = String(p?.status || "").toUpperCase();
   if (!s) return true;
@@ -175,6 +237,64 @@ function tpHitMax(p) {
   if (p?.hitTP2 || p?.tp2HitAt) return 2;
   if (p?.hitTP1 || p?.tp1HitAt) return 1;
   return 0;
+}
+
+function normalizeDir(p) {
+  const raw =
+    p?.direction ??
+    p?.side ??
+    p?.signal?.direction ??
+    p?.signal?.side ??
+    p?.bias ??
+    "";
+  const s = String(raw || "").toUpperCase();
+  if (!s) return "";
+  if (s.startsWith("LONG") || s === "L") return "LONG";
+  if (s.startsWith("SHORT") || s === "S") return "SHORT";
+  return s;
+}
+
+function formatPosBase(p) {
+  const sym = String(p?.symbol || "").toUpperCase() || "N/A";
+  const tf = String(p?.tf || "").toLowerCase() || "N/A";
+  const dir = normalizeDir(p);
+  return dir ? `${sym} ${dir} (${tf})` : `${sym} (${tf})`;
+}
+
+function openStatusLabel(p) {
+  return entryHitTs(p) > 0 ? "OPEN" : "PENDING";
+}
+
+function outcomeLabel(p) {
+  const t = tpHitMax(p);
+  const sl = slHit(p);
+  if (t >= 3) return "TP3";
+  if (t === 2) return "TP2";
+  if (t === 1) return "TP1";
+  if (sl) return "SL";
+  const status = String(p?.status || "").toUpperCase();
+  if (status === "EXPIRED") return "EXPIRED";
+  return "CLOSED";
+}
+
+function summarizeClosed(list) {
+  let tp1 = 0;
+  let tp2 = 0;
+  let tp3 = 0;
+  let directSl = 0;
+  let giveback = 0;
+
+  for (const p of list) {
+    const t = tpHitMax(p);
+    const sl = slHit(p);
+    if (t >= 3) tp3++;
+    else if (t === 2) tp2++;
+    else if (t === 1) tp1++;
+    else if (sl) directSl++;
+    if (sl && t >= 1) giveback++;
+  }
+
+  return { tp1, tp2, tp3, directSl, giveback };
 }
 
 function formatTopCard({ dateKey, rows = [], isVolume = true }) {
@@ -376,6 +496,9 @@ export class Commands {
           "• /scan BTCUSDT 4h",
           "• /top",
           "• /status",
+          "• /statusopen",
+          "• /statusclosed",
+          "• /cohort",
           "• /info",
           "• /help"
         ].join("\n")
@@ -401,286 +524,310 @@ export class Commands {
       const dateKey = utcDateKeyNow();
       const timeKey = utcTimeNow();
 
-      const state = await readStateSnapshot(this.stateRepo);
-      const day = pickDayStats(state, dateKey) || {};
-
-      // Prefer signalsRepo (UTC) for activity numbers to avoid state drift.
-      const sigStats = await readSignalsDayStats(this.signalsRepo, dateKey);
-
-      const autoSent = sigStats
-        ? Number(sigStats.autoSignalsSent || 0)
-        : (Number(day.autoSignalsSent ?? day.autoSent ?? day.autoTotal ?? 0) || 0);
-
-      const scanOk = sigStats
-        ? Number(sigStats.scanRequestsSuccess || 0)
-        : (Number(day.scanRequestsSuccess ?? day.scanRequestsOk ?? day.scanOk ?? 0) || 0);
-
-      const scanSignalsSent = sigStats
-        ? Number(sigStats.scanSignalsSent || 0)
-        : (Number(day.scanSignalsSent ?? day.scanSent ?? 0) || 0);
-
-      const totalCreated = sigStats
-        ? Number(sigStats.totalSignalsCreated || (autoSent + scanSignalsSent))
-        : (Number(day.totalSignalsCreated ?? day.totalSignalsSent ?? (autoSent + scanSignalsSent)) || 0);
-
-      const autoCap = Number(this.env?.MAX_SIGNALS_PER_DAY ?? 0) || 0;
+      const createdStats = await resolveCreatedStats({
+        dateKey,
+        stateRepo: this.stateRepo,
+        signalsRepo: this.signalsRepo
+      });
 
       const all = await listAllPositions(this.positionsRepo);
       const active = Array.isArray(this.positionsRepo.listActive?.()) ? this.positionsRepo.listActive() : all.filter(isActivePos);
-
-      const startMs = startOfUtcDayMs(dateKey);
       const activeList = Array.isArray(active) ? active : [];
+      const startMs = startOfUtcDayMs(dateKey);
 
       const runningTotal = activeList.filter(isActivePos).length;
       const entryHitRunning = activeList.filter((p) => isActivePos(p) && entryHitTs(p) > 0).length;
       const pendingEntry = activeList.filter((p) => isActivePos(p) && entryHitTs(p) === 0).length;
       const carriedRunning = activeList.filter((p) => isActivePos(p) && Number(p?.createdAt || 0) > 0 && Number(p.createdAt) < startMs).length;
 
-      // Live breakdown by playbook (INTRADAY vs SWING)
-      const inferPlaybook = (p) => {
-        const pb = String(p?.playbook || "").toUpperCase();
-        if (pb === "INTRADAY" || pb === "SWING") return pb;
-        const tf = String(p?.tf || "").toLowerCase();
-        const sec = String(this.env?.SECONDARY_TIMEFRAME || "4h").toLowerCase();
-        return tf === sec ? "SWING" : "INTRADAY";
-      };
-
-      const normalizeDir = (p) => {
-        const raw =
-          p?.direction ??
-          p?.side ??
-          p?.signal?.direction ??
-          p?.signal?.side ??
-          p?.bias ??
-          "";
-        const s = String(raw || "").toUpperCase();
-        if (!s) return "";
-        if (s.startsWith("LONG") || s === "L") return "LONG";
-        if (s.startsWith("SHORT") || s === "S") return "SHORT";
-        return s;
-      };
-
-      const formatPosShort = (p) => {
-        const sym = String(p?.symbol || "").toUpperCase() || "N/A";
-        const tf = String(p?.tf || "").toLowerCase() || "N/A";
-        const dir = normalizeDir(p);
-        const st = entryHitTs(p) > 0 ? "RUN" : "PEND";
-        return dir ? `${sym} ${dir} (${tf}) ${st}` : `${sym} (${tf}) ${st}`;
-      };
-
-      const intradayPositions = activeList.filter((p) => inferPlaybook(p) === "INTRADAY");
-      const swingPositions = activeList.filter((p) => inferPlaybook(p) === "SWING");
-
-      const intradayRunning = intradayPositions.length;
-      const swingRunning = swingPositions.length;
-
-      const intradayEntryHitRunning = intradayPositions.filter((p) => entryHitTs(p) > 0).length;
-      const swingEntryHitRunning = swingPositions.filter((p) => entryHitTs(p) > 0).length;
-
-      const intradayPendingEntry = intradayPositions.filter((p) => entryHitTs(p) === 0).length;
-      const swingPendingEntry = swingPositions.filter((p) => entryHitTs(p) === 0).length;
-
-      const intradayCarriedRunning = intradayPositions.filter((p) => Number(p?.createdAt || 0) > 0 && Number(p.createdAt) < startMs).length;
-      const swingCarriedRunning = swingPositions.filter((p) => Number(p?.createdAt || 0) > 0 && Number(p.createdAt) < startMs).length;
-
-      const intradayList = intradayPositions.slice(0, 6).map(formatPosShort).join(", ");
-      const swingList = swingPositions.slice(0, 6).map(formatPosShort).join(", ");
-
-      const closedTodayList = (Array.isArray(all) ? all : [])
-        .filter(isClosedPos)
-        .filter((p) => sameUtcDay(Number(p?.closedAt || 0), dateKey));
-
-      let tp1Today = 0;
-      let tp2Today = 0;
-      let tp3Today = 0;
-      let directSlToday = 0;
-      let givebackToday = 0;
-
-      for (const p of closedTodayList) {
-        const t = tpHitMax(p);
-        const sl = slHit(p);
-        if (t >= 3) tp3Today++;
-        else if (t === 2) tp2Today++;
-        else if (t === 1) tp1Today++;
-        else if (sl) directSlToday++;
-        if (sl && t >= 1) givebackToday++;
-      }
-
-      const closedToday = closedTodayList.length;
-
-      await this.sender.sendText(
-        msg.chat.id,
-        formatStatusCard({
-          dateKey,
-          timeKey,
-          autoSent,
-          autoCap,
-          scanOk,
-          scanSignalsSent,
-          totalCreated,
-          runningTotal,
-          entryHitRunning,
-          pendingEntry,
-          carriedRunning,
-          intradayRunning,
-          intradayEntryHitRunning,
-          intradayPendingEntry,
-          intradayCarriedRunning,
-          intradayList,
-          swingRunning,
-          swingEntryHitRunning,
-          swingPendingEntry,
-          swingCarriedRunning,
-          swingList,
-          closedToday,
-          tp1Today,
-          tp2Today,
-          tp3Today,
-          directSlToday,
-          givebackToday
-        })
-      );
-    });
-
-    this.bot.onText(/^\/info\b/i, async (msg) => {
-      const dateKey = utcDateKeyNow();
-
-      const state = await readStateSnapshot(this.stateRepo);
-      const day = pickDayStats(state, dateKey) || {};
-
-      // Prefer signalsRepo (UTC) for activity numbers to avoid state drift.
-      const sigStats = await readSignalsDayStats(this.signalsRepo, dateKey);
-
-      const autoSent = sigStats
-        ? Number(sigStats.autoSignalsSent || 0)
-        : (Number(day.autoSignalsSent ?? day.autoSent ?? day.autoTotal ?? 0) || 0);
-
-      const scanReqSuccess = sigStats
-        ? Number(sigStats.scanRequestsSuccess || 0)
-        : (Number(day.scanRequestsSuccess ?? day.scanRequestsOk ?? day.scanOk ?? day.scanRequests ?? day.scanTotal ?? 0) || 0);
-
-      const scanSignalsSent = sigStats
-        ? Number(sigStats.scanSignalsSent || 0)
-        : (Number(day.scanSignalsSent ?? day.scanSent ?? 0) || 0);
-
-      const totalCreated = sigStats
-        ? Number(sigStats.totalSignalsCreated || (autoSent + scanSignalsSent))
-        : (Number(day.totalSignalsCreated ?? day.totalSignalsSent ?? (autoSent + scanSignalsSent)) || 0);
-
-      const tfBreakdownSent =
-        (sigStats && sigStats.tfBreakdownCreated) ||
-        day.tfBreakdownCreated ||
-        day.tfBreakdownSent ||
-        day.tfBreakdownSignals ||
-        day.tfBreakdown ||
-        null;
-
-      const all = await listAllPositions(this.positionsRepo);
-      const active = Array.isArray(this.positionsRepo.listActive?.()) ? this.positionsRepo.listActive() : all.filter(isActivePos);
-      const startMs = startOfUtcDayMs(dateKey);
-
-      const activeList = Array.isArray(active) ? active : [];
-      const pendingEntry = activeList.filter((p) => isActivePos(p) && entryHitTs(p) === 0).length;
-      const filledOpen = activeList.filter((p) => isActivePos(p) && entryHitTs(p) > 0).length;
-      const carriedOpen = activeList.filter((p) => isActivePos(p) && Number(p?.createdAt || 0) > 0 && Number(p.createdAt) < startMs).length;
-
       const entryHitsToday = (Array.isArray(all) ? all : [])
         .filter((p) => entryHitTs(p) > 0 && sameUtcDay(entryHitTs(p), dateKey))
         .length;
 
-      const expiredToday = (Array.isArray(all) ? all : [])
-        .filter((p) => String(p?.status || "").toUpperCase() === "EXPIRED")
-        .filter((p) => sameUtcDay(Number(p?.expiredAt || p?.closedAt || p?.expiresAt || 0), dateKey))
-        .length;
-
       const closedTodayList = (Array.isArray(all) ? all : [])
         .filter(isClosedPos)
         .filter((p) => sameUtcDay(Number(p?.closedAt || 0), dateKey));
 
-      let tp1Today = 0;
-      let tp2Today = 0;
-      let tp3Today = 0;
-      let directSlToday = 0;
-      let givebackToday = 0;
+      const closedCounts = summarizeClosed(closedTodayList);
 
-      for (const p of closedTodayList) {
-        const t = tpHitMax(p);
-        const sl = slHit(p);
-        if (t >= 3) tp3Today++;
-        else if (t === 2) tp2Today++;
-        else if (t === 1) tp1Today++;
-        else if (sl) directSlToday++;
-        if (sl && t >= 1) givebackToday++;
+      await this.sender.sendText(
+        msg.chat.id,
+        statusCard({
+          dateKey,
+          timeKey,
+          autoSent: createdStats.autoSent,
+          scanOk: createdStats.scanOk,
+          scanSignalsSent: createdStats.scanSignalsSent,
+          totalCreated: createdStats.totalCreated,
+          entryHitsToday,
+          closedToday: closedTodayList.length,
+          tp1Today: closedCounts.tp1,
+          tp2Today: closedCounts.tp2,
+          tp3Today: closedCounts.tp3,
+          directSlToday: closedCounts.directSl,
+          runningTotal,
+          entryHitRunning,
+          pendingEntry,
+          carriedRunning
+        })
+      );
+    });
+
+    this.bot.onText(/^\/statusopen\b/i, async (msg) => {
+      const dateKey = utcDateKeyNow();
+      const timeKey = utcTimeNow();
+
+      const all = await listAllPositions(this.positionsRepo);
+      const active = Array.isArray(this.positionsRepo.listActive?.()) ? this.positionsRepo.listActive() : all.filter(isActivePos);
+      const activeList = Array.isArray(active) ? active : [];
+      const startMs = startOfUtcDayMs(dateKey);
+
+      const runningTotal = activeList.filter(isActivePos).length;
+      const entryHitRunning = activeList.filter((p) => isActivePos(p) && entryHitTs(p) > 0).length;
+      const pendingEntry = activeList.filter((p) => isActivePos(p) && entryHitTs(p) === 0).length;
+      const carriedRunning = activeList.filter((p) => isActivePos(p) && Number(p?.createdAt || 0) > 0 && Number(p.createdAt) < startMs).length;
+
+      const rows = activeList
+        .slice()
+        .sort((a, b) => Number(b?.createdAt || 0) - Number(a?.createdAt || 0))
+        .map((p) => `${formatPosBase(p)} - ${openStatusLabel(p)}`);
+
+      await this.sender.sendText(
+        msg.chat.id,
+        statusOpenCard({
+          dateKey,
+          timeKey,
+          runningTotal,
+          entryHitRunning,
+          pendingEntry,
+          carriedRunning,
+          rows
+        })
+      );
+    });
+
+    this.bot.onText(/^\/statusclosed\b/i, async (msg) => {
+      const dateKey = utcDateKeyNow();
+      const timeKey = utcTimeNow();
+
+      const all = await listAllPositions(this.positionsRepo);
+      const closedTodayList = (Array.isArray(all) ? all : [])
+        .filter(isClosedPos)
+        .filter((p) => sameUtcDay(Number(p?.closedAt || 0), dateKey));
+
+      const closedCounts = summarizeClosed(closedTodayList);
+      const rows = closedTodayList
+        .slice()
+        .sort((a, b) => Number(b?.closedAt || 0) - Number(a?.closedAt || 0))
+        .map((p) => `${formatPosBase(p)} - ${outcomeLabel(p)}`);
+
+      await this.sender.sendText(
+        msg.chat.id,
+        statusClosedCard({
+          dateKey,
+          timeKey,
+          closedToday: closedTodayList.length,
+          tp1Today: closedCounts.tp1,
+          tp2Today: closedCounts.tp2,
+          tp3Today: closedCounts.tp3,
+          directSlToday: closedCounts.directSl,
+          givebackToday: closedCounts.giveback,
+          rows
+        })
+      );
+    });
+
+    this.bot.onText(/^\/cohort\b(.*)$/i, async (msg, match) => {
+      const raw = (match?.[1] || "").trim();
+      const args = raw ? raw.split(/\s+/).filter(Boolean) : [];
+      const dateArg = args[0] ? parseDateKeyArg(args[0]) : null;
+      const filterArg = String(args[1] || "").toLowerCase();
+
+      const todayKey = utcDateKeyNow();
+      const range = recentUtcRange(todayKey, 7);
+
+      if (!args.length || String(args[0] || "").toLowerCase() === "active") {
+        const all = await listAllPositions(this.positionsRepo);
+        const active = Array.isArray(this.positionsRepo.listActive?.()) ? this.positionsRepo.listActive() : all.filter(isActivePos);
+        const activeList = Array.isArray(active) ? active : [];
+
+        const byDate = Object.fromEntries(range.keys.map((k) => [k, { open: 0, pending: 0 }]));
+
+        for (const p of activeList) {
+          const createdAt = Number(p?.createdAt || 0);
+          if (!Number.isFinite(createdAt) || createdAt <= 0) continue;
+          const createdKey = utcDateKeyFromMs(createdAt);
+          if (!byDate[createdKey]) continue;
+          if (entryHitTs(p) > 0) byDate[createdKey].open += 1;
+          else byDate[createdKey].pending += 1;
+        }
+
+        const rows = range.keys.map((k) => ({
+          dateKey: k,
+          open: byDate[k].open,
+          pending: byDate[k].pending
+        }));
+
+        const totalOpen = rows.reduce((sum, r) => sum + r.open, 0);
+        const totalPending = rows.reduce((sum, r) => sum + r.pending, 0);
+
+        await this.sender.sendText(
+          msg.chat.id,
+          cohortSummaryCard({
+            startKey: range.startKey,
+            endKey: range.endKey,
+            rows,
+            totalOpen,
+            totalPending
+          })
+        );
+        return;
       }
 
-      const closedTrades = closedTodayList.length;
-      const win = tp1Today + tp2Today + tp3Today;
-
-      // Cohort (Created Today) — progress
-      const cohort = (Array.isArray(all) ? all : []).filter((p) => sameUtcDay(Number(p?.createdAt || 0), dateKey));
-      const cohortCreated = cohort.length;
-      const cohortClosedSoFar = cohort.filter(isClosedPos).length;
-      const cohortStillOpen = Math.max(0, cohortCreated - cohortClosedSoFar);
-
-      let cTp1 = 0;
-      let cTp2 = 0;
-      let cTp3 = 0;
-      let cDirectSl = 0;
-      let cGiveback = 0;
-
-      for (const p of cohort.filter(isClosedPos)) {
-        const t = tpHitMax(p);
-        const sl = slHit(p);
-        if (t >= 3) cTp3++;
-        else if (t === 2) cTp2++;
-        else if (t === 1) cTp1++;
-        else if (sl) cDirectSl++;
-        if (sl && t >= 1) cGiveback++;
+      if (!dateArg) {
+        await this.sender.sendText(
+          msg.chat.id,
+          "Usage: /cohort or /cohort YYYY-MM-DD [open|closed|recent]"
+        );
+        return;
       }
 
-      const cohortWins = cTp1 + cTp2 + cTp3;
-      const cohortWinrate = cohortClosedSoFar > 0 ? ((cohortWins / cohortClosedSoFar) * 100).toFixed(1) : "0.0";
+      if (!range.keys.includes(dateArg)) {
+        await this.sender.sendText(msg.chat.id, "Date out of range. Available: last 7 days (UTC).");
+        return;
+      }
 
-      const payload = {
+      const all = await listAllPositions(this.positionsRepo);
+      const cohort = (Array.isArray(all) ? all : [])
+        .filter((p) => sameUtcDay(Number(p?.createdAt || 0), dateArg));
+
+      const openList = cohort.filter((p) => isActivePos(p));
+      const openCount = openList.filter((p) => entryHitTs(p) > 0).length;
+      const pendingCount = openList.filter((p) => entryHitTs(p) === 0).length;
+      const closedList = cohort.filter(isClosedPos);
+      const closedCount = closedList.length;
+      const totalCreated = cohort.length;
+
+      const closedCounts = summarizeClosed(closedList);
+
+      const listMode = ["open", "closed", "recent"].includes(filterArg) ? filterArg : "open";
+      let rows = [];
+      let listLabel = "Open";
+
+      if (listMode === "closed") {
+        rows = closedList
+          .slice()
+          .sort((a, b) => Number(b?.closedAt || 0) - Number(a?.closedAt || 0))
+          .map((p) => `${formatPosBase(p)} - ${outcomeLabel(p)}`);
+        listLabel = "Closed";
+      } else if (listMode === "recent") {
+        rows = cohort
+          .slice()
+          .sort((a, b) => {
+            const aRecent = Math.max(Number(a?.closedAt || 0), Number(entryHitTs(a) || 0), Number(a?.createdAt || 0));
+            const bRecent = Math.max(Number(b?.closedAt || 0), Number(entryHitTs(b) || 0), Number(b?.createdAt || 0));
+            return bRecent - aRecent;
+          })
+          .map((p) => {
+            if (isClosedPos(p)) return `${formatPosBase(p)} - ${outcomeLabel(p)}`;
+            if (isActivePos(p)) return `${formatPosBase(p)} - ${openStatusLabel(p)}`;
+            return `${formatPosBase(p)} - EXPIRED`;
+          });
+        listLabel = "Recent";
+      } else {
+        rows = openList
+          .slice()
+          .sort((a, b) => Number(b?.createdAt || 0) - Number(a?.createdAt || 0))
+          .map((p) => `${formatPosBase(p)} - ${openStatusLabel(p)}`);
+      }
+
+      await this.sender.sendText(
+        msg.chat.id,
+        cohortDetailCard({
+          dateKey: dateArg,
+          totalCreated,
+          openCount,
+          pendingCount,
+          closedCount,
+          tp1: closedCounts.tp1,
+          tp2: closedCounts.tp2,
+          tp3: closedCounts.tp3,
+          directSl: closedCounts.directSl,
+          giveback: closedCounts.giveback,
+          listLabel,
+          rows
+        })
+      );
+    });
+
+    this.bot.onText(/^\/info\b(.*)$/i, async (msg, match) => {
+      const raw = (match?.[1] || "").trim();
+      const args = raw ? raw.split(/\s+/).filter(Boolean) : [];
+
+      const todayKey = utcDateKeyNow();
+      const yesterdayKey = yesterdayUtcKeyNow();
+      const range = recentUtcRange(yesterdayKey, 7);
+
+      let dateKey = args.length ? parseDateKeyArg(args[0]) : yesterdayKey;
+
+      if (!dateKey) {
+        await this.sender.sendText(
+          msg.chat.id,
+          "Usage: /info or /info YYYY-MM-DD"
+        );
+        return;
+      }
+
+      if (dateKey === todayKey) {
+        await this.sender.sendText(msg.chat.id, "Use /status for today. /info is for previous days (UTC).");
+        return;
+      }
+
+      if (!range.keys.includes(dateKey)) {
+        await this.sender.sendText(msg.chat.id, "Date out of range. Available: last 7 days (UTC).");
+        return;
+      }
+
+      const createdStats = await resolveCreatedStats({
         dateKey,
-        autoSignalsSent: autoSent,
-        scanRequestsSuccess: scanReqSuccess,
-        scanSignalsSent,
-        totalSignalsCreated: totalCreated,
-        tfBreakdownCreated: tfBreakdownSent,
-        topScore: day.topScore,
-        avgScore: day.avgScore,
+        stateRepo: this.stateRepo,
+        signalsRepo: this.signalsRepo
+      });
 
-        pendingEntry,
-        filledOpen,
-        expiredToday,
-        entryHitsToday,
-        carriedOpen,
+      const all = await listAllPositions(this.positionsRepo);
+      const entryHits = (Array.isArray(all) ? all : [])
+        .filter((p) => entryHitTs(p) > 0 && sameUtcDay(entryHitTs(p), dateKey))
+        .length;
 
-        closedTrades,
-        win,
-        tp1: tp1Today,
-        tp2: tp2Today,
-        tp3: tp3Today,
-        directSl: directSlToday,
-        giveback: givebackToday,
+      const expired = (Array.isArray(all) ? all : [])
+        .filter((p) => String(p?.status || "").toUpperCase() === "EXPIRED")
+        .filter((p) => sameUtcDay(Number(p?.expiredAt || p?.closedAt || p?.expiresAt || 0), dateKey))
+        .length;
 
-        cohortCreated,
-        cohortClosedSoFar,
-        cohortStillOpen,
-        cohortWins,
-        cohortTp1: cTp1,
-        cohortTp2: cTp2,
-        cohortTp3: cTp3,
-        cohortDirectSl: cDirectSl,
-        cohortGiveback: cGiveback,
-        cohortWinrate,
+      const closedList = (Array.isArray(all) ? all : [])
+        .filter(isClosedPos)
+        .filter((p) => sameUtcDay(Number(p?.closedAt || 0), dateKey));
 
-        macroCounts: day.macroCounts,
-        macroSummary: day.macroSummary
-      };
+      const closedCounts = summarizeClosed(closedList);
 
-      await this.sender.sendText(msg.chat.id, recapCard(payload));
+      await this.sender.sendText(
+        msg.chat.id,
+        infoCard({
+          dateKey,
+          autoSent: createdStats.autoSent,
+          scanOk: createdStats.scanOk,
+          scanSignalsSent: createdStats.scanSignalsSent,
+          totalCreated: createdStats.totalCreated,
+          entryHits,
+          expired,
+          closedTrades: closedList.length,
+          tp1: closedCounts.tp1,
+          tp2: closedCounts.tp2,
+          tp3: closedCounts.tp3,
+          directSl: closedCounts.directSl,
+          giveback: closedCounts.giveback
+        })
+      );
     });
     this.bot.onText(/^\/scan\b(.*)$/i, async (msg, match) => {
       const chatId = msg.chat.id;
