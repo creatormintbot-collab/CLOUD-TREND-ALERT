@@ -91,7 +91,7 @@ export const env = {
 
   UNIVERSE_REFRESH_HOURS: num(process.env.UNIVERSE_REFRESH_HOURS, 6),
   PRICE_MONITOR_INTERVAL_SEC: num(process.env.PRICE_MONITOR_INTERVAL_SEC, 10),
-  DAILY_RECAP: bool(process.env.DAILY_RECAP, true),
+  DAILY_RECAP: bool(process.env.DAILY_RECAP, false),
   DAILY_RECAP_UTC: process.env.DAILY_RECAP_UTC || "00:05",
 
   PORT: num(process.env.PORT, 3000),

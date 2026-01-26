@@ -409,7 +409,10 @@ export async function bootstrap() {
 
   const autoJob = startAutoScanJob({ run: runAuto });
   const monitorJob = startMonitorJob({ intervalSec: env.PRICE_MONITOR_INTERVAL_SEC, run: runMonitor });
-  const recapJob = startDailyRecapJob({ hhmmUTC: env.DAILY_RECAP_UTC, run: runRecap });
+  let recapJob = null;
+  if (env.DAILY_RECAP) {
+    recapJob = startDailyRecapJob({ hhmmUTC: env.DAILY_RECAP_UTC, run: runRecap });
+  }
   const universeJob = startUniverseRefreshJob({ hours: env.UNIVERSE_REFRESH_HOURS, run: runUniverseRefresh });
 
   logger.info("bootstrap_done");
@@ -418,7 +421,7 @@ export async function bootstrap() {
     stop: async () => {
       try { autoJob.stop(); } catch {}
       try { monitorJob.stop(); } catch {}
-      try { recapJob.stop(); } catch {}
+      try { recapJob?.stop?.(); } catch {}
       try { universeJob.stop(); } catch {}
       try { klinesPersistJob.stop(); } catch {}
       try { restSyncJob.stop(); } catch {}
