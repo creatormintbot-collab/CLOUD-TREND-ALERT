@@ -1,5 +1,4 @@
 import { entryCard } from "./cards/entryCard.js";
-import { tradePlanCard } from "./cards/tradePlanCard.js";
 import { statusCard } from "./cards/statusCard.js";
 import { statusOpenCard } from "./cards/statusOpenCard.js";
 import { statusClosedCard } from "./cards/statusClosedCard.js";
@@ -10,6 +9,47 @@ import { renderEntryChart } from "../charts/renderer.js";
 import { createPositionFromSignal } from "../positions/positionModel.js";
 import { inc as incGroupStat, readDay as readGroupStatsDay } from "../storage/groupStatsRepo.js";
 import { INTRADAY_COOLDOWN_MINUTES } from "../config/constants.js";
+
+function mapIntradayPlanToSignal(plan = {}) {
+  const entry = Number(plan?.levels?.entry ?? plan?.entry);
+  const sl = plan?.levels?.sl ?? plan?.sl;
+  const tp1 = plan?.levels?.tp1 ?? plan?.tp1;
+  const tp2 = plan?.levels?.tp2 ?? plan?.tp2;
+
+  const tol = Number(plan?.tolerance);
+  const zone = Number.isFinite(tol) ? tol : 0;
+
+  const entryLow = Number.isFinite(entry) ? (entry - zone) : null;
+  const entryHigh = Number.isFinite(entry) ? (entry + zone) : null;
+  const entryMid = Number.isFinite(entry) ? entry : null;
+
+  const macroBias = plan?.macro?.bias;
+  const macro = macroBias ? { BIAS: macroBias } : null;
+
+  const base = {
+    symbol: plan.symbol,
+    tf: plan.tf || "15m",
+    direction: plan.direction,
+    playbook: "INTRADAY",
+    score: plan.score,
+    candleCloseTime: plan.candleCloseTime,
+    macro
+  };
+
+  // Display includes TP3 to preserve the exact swing-card layout.
+  const displaySignal = {
+    ...base,
+    levels: { entryLow, entryHigh, entryMid, sl, tp1, tp2, tp3: tp2 }
+  };
+
+  // Position uses the actual intraday plan levels (no TP3).
+  const positionSignal = {
+    ...base,
+    levels: { entryLow, entryHigh, entryMid, sl, tp1, tp2 }
+  };
+
+  return { displaySignal, positionSignal };
+}
 function utcDateKeyNow() {
   return new Date().toISOString().slice(0, 10);
 }
@@ -1118,12 +1158,39 @@ export class Commands {
               : true;
             if (!canSend) continue;
 
-            const msg = await this.sender.sendText(chatId, tradePlanCard(plan));
-            if (msg) {
+            const { displaySignal, positionSignal } = mapIntradayPlanToSignal(plan);
+            const entryMsg = await this.sender.sendText(chatId, entryCard(displaySignal));
+            if (entryMsg) {
               intradaySent++;
               try { await incGroupStat(chatId, todayKey, "scanSignalsSent", 1); } catch {}
             }
             try { this.stateRepo?.markSent?.(cooldownKey); } catch {}
+
+            // Create monitored position for intraday so follow-ups reply to the original signal message.
+            try {
+              const pos = createPositionFromSignal(positionSignal, {
+                source: "SCAN",
+                notifyChatIds: [String(chatId)],
+                telegram: entryMsg?.message_id
+                  ? { entryMessageIds: { [String(chatId)]: entryMsg.message_id } }
+                  : null
+              });
+
+              pos.createdAt = pos.createdAt || Date.now();
+              pos.expiresAt = pos.expiresAt || (pos.createdAt + ttlMsForTf(pos.tf));
+              if (!pos.filledAt && !pos.hitTP1 && !pos.hitTP2 && !pos.hitTP3) {
+                pos.status = "PENDING_ENTRY";
+              }
+
+              this.positionsRepo.upsert(pos);
+              await this.positionsRepo.flush();
+
+              await this.signalsRepo.logEntry({
+                source: "SCAN",
+                signal: positionSignal,
+                meta: { chatId: String(chatId), raw: raw || "" }
+              });
+            } catch {}
           }
         }
 
