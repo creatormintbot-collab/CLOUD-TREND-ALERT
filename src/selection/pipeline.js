@@ -1,6 +1,7 @@
-import { evaluateSignal, explainSignal } from "../strategy/signalEngine.js";
+import { evaluateSignal, explainSignal, evaluateIntradayTradePlan } from "../strategy/signalEngine.js";
 import { macdGate } from "../strategy/scoring/proScore.js";
 import { macd } from "../strategy/indicators/macd.js";
+import { INTRADAY_SCAN_TOP_N, INTRADAY_MIN_CANDLES, SWING_SCAN_TOP_N } from "../config/constants.js";
 
 
 function normTf(tf) {
@@ -29,6 +30,10 @@ export class Pipeline {
     const tfs = [...base];
     if (sec && !tfs.includes(sec)) tfs.push(sec);
     return tfs;
+  }
+
+  _intradayTfs() {
+    return ["15m", "1h", "12h"];
   }
 
   _autoTimeframes() {
@@ -126,203 +131,205 @@ async _maybeWarmupKlines(symbols, tfs, reason = "scan", opts = {}) {
   }
 
   async scanPair(symbol) {
-    const tfs = this._scanTimeframes();
     const results = [];
+    const swing = await this.scanPairSwing(symbol);
+    if (swing?.ok) results.push(swing);
 
-    for (const tf of tfs) {
-      const r = evaluateSignal({
-        symbol,
-        tf,
-        klines: this.klines,
-        thresholds: this.thresholds,
-        env: this.env,
-        isAuto: false
-      });
-      if (r?.ok) {
-        // 4h rule for /scan pair without explicit TF:
-        if (tf === this.env.SECONDARY_TIMEFRAME && String(symbol).toUpperCase() !== "ETHUSDT" && r.score < this.env.SECONDARY_MIN_SCORE) continue;
-        results.push(r);
-      }
-    }
+    const intraday = await this.scanPairIntraday(symbol);
+    if (intraday?.ok) results.push(intraday);
 
     if (!results.length) return null;
-    results.sort((a, b) => b.score - a.score);
-    return results[0];
+    results.sort((a, b) => (b.score || 0) - (a.score || 0));
+    return results[0] || null;
   }
 
   async scanPairTf(symbol, tf) {
+    if (isSwingTf(tf, this.env)) return this.scanPairSwing(symbol);
+    return this.scanPairIntraday(symbol);
+  }
+
+  async scanPairIntraday(symbol) {
+    const sym = String(symbol || "").toUpperCase();
+    if (!sym) return null;
+
+    try {
+      await this._maybeWarmupKlines([sym], this._intradayTfs(), "scanPairIntraday", { minCandles: INTRADAY_MIN_CANDLES, maxSyms: 1, retryMs: 60000 });
+    } catch {}
+
+    const r = evaluateIntradayTradePlan({
+      symbol: sym,
+      klines: this.klines,
+      thresholds: this.thresholds,
+      env: this.env
+    });
+    return r?.ok ? r : null;
+  }
+
+  async scanPairSwing(symbol) {
+    const sym = String(symbol || "").toUpperCase();
+    if (!sym) return null;
+
+    const swingTf = this.env.SECONDARY_TIMEFRAME || "4h";
+    try {
+      await this._maybeWarmupKlines([sym], [swingTf], "scanPairSwing", { minCandles: INTRADAY_MIN_CANDLES, maxSyms: 1, retryMs: 60000 });
+    } catch {}
+
     const r = evaluateSignal({
-      symbol,
-      tf,
+      symbol: sym,
+      tf: swingTf,
       klines: this.klines,
       thresholds: this.thresholds,
       env: this.env,
       isAuto: false
     });
-    return r?.ok ? r : null;
+
+    if (!r?.ok) return null;
+    if (swingTf === this.env.SECONDARY_TIMEFRAME && sym !== "ETHUSDT" && r.score < this.env.SECONDARY_MIN_SCORE) return null;
+    return r;
   }
 
   // Dual Playbook scan for a single pair (LOCKED):
-  // - INTRADAY: best of 15m/30m/1h
+  // - INTRADAY: SR Trade Plan (15m/1h/12h)
   // - SWING: 4h (SECONDARY_TIMEFRAME)
   // Returns { primary, secondary } where primary is preferred (SWING when available).
 
-async scanPairDual(symbol) {
-  const sym = String(symbol || "").toUpperCase();
-  if (!sym) return { primary: null, secondary: null };
+  async scanPairDual(symbol) {
+    const sym = String(symbol || "").toUpperCase();
+    if (!sym) return { primary: null, secondary: null };
 
-  const swingTf = this.env.SECONDARY_TIMEFRAME || "4h";
-  const scanTfs = this._scanTimeframes();
-  const intradayTfs = scanTfs.filter((tf) => !isSwingTf(tf, this.env));
-  const allTfs = Array.from(new Set([ ...intradayTfs, swingTf ]));
+    const swingTf = this.env.SECONDARY_TIMEFRAME || "4h";
+    const allTfs = Array.from(new Set([ ...this._intradayTfs(), swingTf ]));
 
-  // Ensure we have enough candles for both Intraday + Swing.
-  try {
-    await this._maybeWarmupKlines([sym], allTfs, "scanPairDual", { minCandles: 220, maxSyms: 1, retryMs: 60000 });
-  } catch {}
+    // Ensure we have enough candles for both Intraday + Swing.
+    try {
+      await this._maybeWarmupKlines([sym], allTfs, "scanPairDual", { minCandles: INTRADAY_MIN_CANDLES, maxSyms: 1, retryMs: 60000 });
+    } catch {}
 
-  const results = [];
-  for (const tf of allTfs) {
-    const r = await evaluateSignal({
-      symbol: sym,
-      tf,
-      klines: this.klines,
-      thresholds: this.thresholds,
-      env: this.env,
-      isAuto: false,
-      secondaryMinScore: this._secondaryMinScore(sym),
-    });
-    if (r?.ok) results.push(r);
+    const topSwing = await this.scanPairSwing(sym);
+    const topIntraday = await this.scanPairIntraday(sym);
+
+    return { primary: topSwing || null, secondary: topIntraday || null };
   }
-
-  const swingPool = results.filter((r) => isSwingTf(r.tf, this.env));
-  const intraPool = results.filter((r) => !isSwingTf(r.tf, this.env));
-
-  const topSwing = swingPool.sort((a, b) => (b.score || 0) - (a.score || 0))[0] || null;
-  const topIntraday = intraPool.sort((a, b) => (b.score || 0) - (a.score || 0))[0] || null;
-
-  return { primary: topSwing, secondary: topIntraday };
-}
 
   // /scan default (LOCKED): find best INTRADAY + best SWING across universe.
   // Output ideal: max 2 signals (Top 1 Intraday + Top 1 Swing), with guardrails.
 
-  async scanBestDual(opts = {}) {
+  async scanIntradayPlans(opts = {}) {
     const excludeSet = new Set((opts?.excludeSymbols || []).map((s) => String(s || "").toUpperCase()).filter(Boolean));
+    const limit = Number(opts?.limit ?? INTRADAY_SCAN_TOP_N);
 
-    const swingTf = this.env.SECONDARY_TIMEFRAME || "4h";
-    const scanTfs = this._scanTimeframes();
-    const intradayTfs = scanTfs.filter((tf) => !isSwingTf(tf, this.env));
-    const allTfs = Array.from(new Set([ ...intradayTfs, swingTf ]));
+    const symbolsRaw = Array.isArray(opts?.symbols) && opts.symbols.length
+      ? opts.symbols
+      : ((typeof this.universe.symbolsForScan === "function" ? this.universe.symbolsForScan() : null) || []);
 
-    // Candidate universe (symbols)
-    const symbolsRaw = (typeof this.universe.symbolsForScan === "function" ? this.universe.symbolsForScan() : null) || [];
     const symbols = symbolsRaw
       .map((s) => String(s || "").toUpperCase())
       .filter((s) => s && !excludeSet.has(s));
 
-    if (!symbols.length) return { primary: null, secondary: null };
+    if (!symbols.length) return [];
 
-    // Warmup klines for a small subset to avoid "all fastScore=0" due to missing candles.
     try {
       const warmRows = await this.topVolumeCached(Math.max(12, this.env.TOP10_PER_TF || 10));
       const warmSymbols = (warmRows && warmRows.length ? warmRows.map((r) => String(r.symbol || "").toUpperCase()) : symbols)
         .filter((s) => s && !excludeSet.has(s));
-      await this._maybeWarmupKlines(warmSymbols, allTfs, "scanBestDual", { minCandles: 220, maxSyms: 12 });
+      await this._maybeWarmupKlines(warmSymbols, this._intradayTfs(), "scanIntradayPlans", { minCandles: INTRADAY_MIN_CANDLES, maxSyms: 12 });
     } catch {}
 
-    const bestPerTf = [];
-    for (const tf of scanTfs) {
-      const scored = [];
-
-      for (const sym of symbols) {
-        const fast = this.ranker.fastScore(sym, tf, this.thresholds);
-        if (fast <= 0) continue;
-        scored.push({ symbol: sym, tf, fast });
-      }
-
-      scored.sort((a, b) => b.fast - a.fast);
-      const shortlist = scored.slice(0, this.env.TOP10_PER_TF || 10);
-
-      let best = null;
-      for (const row of shortlist) {
-        const res = await evaluateSignal({
-          symbol: row.symbol,
-          tf: row.tf,
-          klines: this.klines,
-          thresholds: this.thresholds,
-          env: this.env,
-          isAuto: false,
-          secondaryMinScore: this._secondaryMinScore(row.symbol),
-        });
-        if (!res?.ok) continue;
-        if (!best || (res.score || 0) > (best.score || 0)) best = res;
-      }
-
-      if (best) bestPerTf.push(best);
-    }
-
-    const swingPool = bestPerTf.filter((r) => isSwingTf(r.tf, this.env));
-    const intraPool = bestPerTf.filter((r) => !isSwingTf(r.tf, this.env));
-
-    const topSwing = swingPool.sort((a, b) => (b.score || 0) - (a.score || 0))[0] || null;
-    const topIntraday = intraPool.sort((a, b) => (b.score || 0) - (a.score || 0))[0] || null;
-
-    // Return Swing as primary, Intraday as secondary (LOCK)
-    return { primary: topSwing, secondary: topIntraday };
-  }
-
-
-async scanBestIntraday(opts = {}) {
-  const excludeSet = new Set((opts?.excludeSymbols || []).map((s) => String(s || "").toUpperCase()).filter(Boolean));
-
-  const scanTfs = this._scanTimeframes();
-  const intradayTfs = scanTfs.filter((tf) => !isSwingTf(tf, this.env));
-  if (!intradayTfs.length) return null;
-
-  const symbolsRaw = (typeof this.universe.symbolsForScan === "function" ? this.universe.symbolsForScan() : null) || [];
-  const symbols = symbolsRaw
-    .map((s) => String(s || "").toUpperCase())
-    .filter((s) => s && !excludeSet.has(s));
-
-  if (!symbols.length) return null;
-
-  try {
-    const warmRows = await this.topVolumeCached(Math.max(12, this.env.TOP10_PER_TF || 10));
-    const warmSymbols = (warmRows && warmRows.length ? warmRows.map((r) => String(r.symbol || "").toUpperCase()) : symbols)
-      .filter((s) => s && !excludeSet.has(s));
-    await this._maybeWarmupKlines(warmSymbols, intradayTfs, "scanBestIntraday", { minCandles: 220, maxSyms: 12 });
-  } catch {}
-
-  const candidates = [];
-  for (const tf of intradayTfs) {
     const scored = [];
     for (const sym of symbols) {
-      const fast = this.ranker.fastScore(sym, tf, this.thresholds);
+      const fast = typeof this.ranker.fastScoreIntraday === "function"
+        ? this.ranker.fastScoreIntraday(sym, this.thresholds)
+        : this.ranker.fastScore(sym, "1h", this.thresholds);
       if (fast <= 0) continue;
-      scored.push({ symbol: sym, tf, fast });
+      scored.push({ symbol: sym, fast });
     }
 
     scored.sort((a, b) => b.fast - a.fast);
     const shortlist = scored.slice(0, this.env.TOP10_PER_TF || 10);
 
+    const candidates = [];
     for (const row of shortlist) {
-      const res = await evaluateSignal({
+      const res = evaluateIntradayTradePlan({
         symbol: row.symbol,
-        tf: row.tf,
         klines: this.klines,
         thresholds: this.thresholds,
-        env: this.env,
-        isAuto: false,
-        secondaryMinScore: this._secondaryMinScore(row.symbol),
+        env: this.env
       });
       if (res?.ok) candidates.push(res);
     }
+
+    candidates.sort((a, b) => (b.score || 0) - (a.score || 0));
+    return candidates.slice(0, Number.isFinite(limit) ? limit : INTRADAY_SCAN_TOP_N);
   }
 
-  candidates.sort((a, b) => (b.score || 0) - (a.score || 0));
-  return candidates[0] || null;
-}
+  async scanSwingSignals(opts = {}) {
+    const excludeSet = new Set((opts?.excludeSymbols || []).map((s) => String(s || "").toUpperCase()).filter(Boolean));
+    const limit = Number(opts?.limit ?? SWING_SCAN_TOP_N);
+
+    const swingTf = this.env.SECONDARY_TIMEFRAME || "4h";
+    const symbolsRaw = Array.isArray(opts?.symbols) && opts.symbols.length
+      ? opts.symbols
+      : ((typeof this.universe.symbolsForScan === "function" ? this.universe.symbolsForScan() : null) || []);
+
+    const symbols = symbolsRaw
+      .map((s) => String(s || "").toUpperCase())
+      .filter((s) => s && !excludeSet.has(s));
+
+    if (!symbols.length) return [];
+
+    try {
+      const warmRows = await this.topVolumeCached(Math.max(12, this.env.TOP10_PER_TF || 10));
+      const warmSymbols = (warmRows && warmRows.length ? warmRows.map((r) => String(r.symbol || "").toUpperCase()) : symbols)
+        .filter((s) => s && !excludeSet.has(s));
+      await this._maybeWarmupKlines(warmSymbols, [swingTf], "scanSwingSignals", { minCandles: INTRADAY_MIN_CANDLES, maxSyms: 12 });
+    } catch {}
+
+    const scored = [];
+    for (const sym of symbols) {
+      const fast = this.ranker.fastScore(sym, swingTf, this.thresholds);
+      if (fast <= 0) continue;
+      scored.push({ symbol: sym, fast });
+    }
+
+    scored.sort((a, b) => b.fast - a.fast);
+    const shortlist = scored.slice(0, this.env.TOP10_PER_TF || 10);
+
+    const candidates = [];
+    for (const row of shortlist) {
+      const res = evaluateSignal({
+        symbol: row.symbol,
+        tf: swingTf,
+        klines: this.klines,
+        thresholds: this.thresholds,
+        env: this.env,
+        isAuto: false
+      });
+      if (!res?.ok) continue;
+      if (swingTf === this.env.SECONDARY_TIMEFRAME && String(row.symbol).toUpperCase() !== "ETHUSDT" && res.score < this.env.SECONDARY_MIN_SCORE) continue;
+      candidates.push(res);
+    }
+
+    candidates.sort((a, b) => (b.score || 0) - (a.score || 0));
+    return candidates.slice(0, Number.isFinite(limit) ? limit : SWING_SCAN_TOP_N);
+  }
+
+  async scanLists(opts = {}) {
+    const intraday = await this.scanIntradayPlans(opts);
+    const swing = await this.scanSwingSignals(opts);
+    return { intraday, swing };
+  }
+
+  async scanBestDual(opts = {}) {
+    const intraday = await this.scanIntradayPlans(opts);
+    const swing = await this.scanSwingSignals(opts);
+    return { primary: swing[0] || null, secondary: intraday[0] || null };
+  }
+
+
+  async scanBestIntraday(opts = {}) {
+    const list = await this.scanIntradayPlans(opts);
+    return list[0] || null;
+  }
 
   explainPair(symbol) {
     const tfs = this._scanTimeframes();

@@ -10,6 +10,7 @@ import { proScore, macdGate } from "./scoring/proScore.js";
 import { finalScore } from "./scoring/finalScore.js";
 import { btcMacro } from "./macro/btcMacro.js";
 import { ctaProTrendGate } from "./ctaProTrend.js";
+import { intradaySrTradePlan } from "./intraday/intradaySrTradePlan.js";
 
 import {
   HTF_HARD_GATE_ENABLED,
@@ -785,4 +786,8 @@ export function explainSignal({ symbol, tf, klines, thresholds, env = {}, isAuto
       ichimokuCloudDistPct: core.ichimoku?.distanceToCloudPct
     }
   };
+}
+
+export function evaluateIntradayTradePlan({ symbol, klines, thresholds, env = {} } = {}) {
+  return intradaySrTradePlan({ symbol, klines, thresholds, env });
 }

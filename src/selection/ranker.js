@@ -7,6 +7,40 @@ export class Ranker {
     this.klines = klines;
   }
 
+  fastScoreIntraday(symbol, thresholds) {
+    const candles = this.klines.getCandles(symbol, "1h");
+    if (!candles || candles.length < 220) return 0;
+
+    const closes = candles.map((c) => Number(c.close));
+    const e13 = ema(closes, 13).at(-1);
+    const e21 = ema(closes, 21).at(-1);
+    const e50 = ema(closes, 50).at(-1);
+    const e200 = ema(closes, 200).at(-1);
+    const a14 = atr(candles, 14).at(-1);
+
+    const last = candles.at(-1);
+    if (e13 == null || e21 == null || e50 == null || e200 == null || a14 == null) return 0;
+
+    const close = Number(last.close);
+    const atrPct = a14 / close;
+
+    const longBias = close > e200 && e50 > e200 && e13 > e21;
+    const shortBias = close < e200 && e50 < e200 && e13 < e21;
+    if (!longBias && !shortBias) return 0;
+
+    let s = 60; // bias gate
+
+    if (atrPct >= thresholds.ATR_PCT_MIN) s += 20;
+    else if (atrPct >= thresholds.ATR_PCT_MIN * 0.7) s += 10;
+
+    const ema50Series = ema(closes, 50);
+    const prev = ema50Series.at(-6);
+    const slope = (Number.isFinite(prev) && Number.isFinite(e50)) ? (e50 - prev) : 0;
+    if ((longBias && slope > 0) || (shortBias && slope < 0)) s += 20;
+
+    return s;
+  }
+
   fastScore(symbol, tf, thresholds) {
     const candles = this.klines.getCandles(symbol, tf);
     if (!candles || candles.length < 220) return 0;

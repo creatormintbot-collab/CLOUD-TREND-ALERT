@@ -49,6 +49,23 @@ export const ENTRY_CONFIRM_MODE = String(env.ENTRY_CONFIRM_MODE || "MID_CROSS").
 export const ENTRY_CONFIRM_DWELL_MS = Number(env.ENTRY_CONFIRM_DWELL_MS);  // require persistence inside zone before FILLED
 export const ENTRY_CONFIRM_MAX_WAIT_MS = Number(env.ENTRY_CONFIRM_MAX_WAIT_MS); // 0 = no max wait
 
+// === Intraday Trade Plan defaults ===
+export const INTRADAY_RR_CAP = 2.0;
+export const INTRADAY_SR_PIVOT_L = 3;
+export const INTRADAY_SR_PIVOT_R = 3;
+export const INTRADAY_SR_ATR_MULT = 0.25;
+export const INTRADAY_SR_PCT_TOL = 0.002; // 0.20%
+export const INTRADAY_SL_ATR_BUFFER = 0.25;
+export const INTRADAY_SL_ATR_FALLBACK = 1.2;
+export const INTRADAY_MACRO_ADJ = 10;
+export const INTRADAY_REGIME_ATR_PCT_MIN = 0.0025;
+export const INTRADAY_REGIME_SLOPE_LOOKBACK = 5;
+export const INTRADAY_MIN_CANDLES = 220;
+export const INTRADAY_SCAN_TOP_N = 3;
+export const INTRADAY_SR_LEVELS_MAX = 8;
+export const INTRADAY_COOLDOWN_MINUTES = 60;
+export const SWING_SCAN_TOP_N = 1;
+
 
 export function ensureDirs() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });

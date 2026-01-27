@@ -1,4 +1,5 @@
 import { entryCard } from "./cards/entryCard.js";
+import { tradePlanCard } from "./cards/tradePlanCard.js";
 import { statusCard } from "./cards/statusCard.js";
 import { statusOpenCard } from "./cards/statusOpenCard.js";
 import { statusClosedCard } from "./cards/statusClosedCard.js";
@@ -8,6 +9,7 @@ import { buildOverlays } from "../charts/layout.js";
 import { renderEntryChart } from "../charts/renderer.js";
 import { createPositionFromSignal } from "../positions/positionModel.js";
 import { inc as incGroupStat, readDay as readGroupStatsDay } from "../storage/groupStatsRepo.js";
+import { INTRADAY_COOLDOWN_MINUTES } from "../config/constants.js";
 function utcDateKeyNow() {
   return new Date().toISOString().slice(0, 10);
 }
@@ -904,20 +906,31 @@ export class Commands {
 
       let symbolUsed = symbolArg || null;
       const rotationMode = !symbolArg;
+      const swingTf = String(this.env?.SECONDARY_TIMEFRAME || "4h").toLowerCase();
+      const isSwingTfLocal = (tf) => String(tf || "").toLowerCase() === swingTf;
 
       const startedAt = Date.now();
       let out = null;
       let secondaryPick = null;
+      let intradayPlans = [];
 
 
       // Rotation mode keeps Progress UI (single edited message).
       if (rotationMode) {
         out = await this.progressUi.run({ chatId, userId }, async () => {
-          const dual = await this.pipeline.scanBestDual({ excludeSymbols: activeSymbols });
-          const primary = dual?.primary || null;
-          secondaryPick = dual?.secondary || null;
-          symbolUsed = primary?.symbol || null;
-          return primary;
+          const lists = await this.pipeline.scanLists({ excludeSymbols: activeSymbols });
+          const swingList = Array.isArray(lists?.swing) ? lists.swing : [];
+          const intradayList = Array.isArray(lists?.intraday) ? lists.intraday : [];
+
+          intradayPlans = intradayList;
+          secondaryPick = null;
+
+          const primary = swingList[0] || null;
+          symbolUsed = primary?.symbol || intradayList[0]?.symbol || null;
+
+          if (primary) return primary;
+          if (intradayList.length) return { ok: true, __intradayOnly: true };
+          return null;
         });
       } else {
         // Targeted /scan (pair / pair+tf) skips Progress UI to avoid double messages
@@ -927,19 +940,19 @@ export class Commands {
 
           if (symbolArg && !tfArg) {
             symbolUsed = symbolArg;
-
-            // LOCKED: /scan (pair only) returns best INTRADAY + SWING (4h), max 2 cards.
-            const dual = await this.pipeline.scanPairDual(symbolArg);
-            res = dual?.primary || null;
-            secondaryPick = dual?.secondary || null;
+            const swing = await this.pipeline.scanPairSwing(symbolArg);
+            const intr = await this.pipeline.scanPairIntraday(symbolArg);
+            intradayPlans = intr?.ok ? [intr] : [];
+            res = swing || (intradayPlans.length ? { ok: true, __intradayOnly: true } : null);
+            secondaryPick = null;
           } else {
             symbolUsed = symbolArg;
-            res = await this.pipeline.scanPairTf(symbolArg, tfArg);
-
-            // LOCKED 4h special rule:
-            if (tfArg === this.env.SECONDARY_TIMEFRAME && symbolArg !== "ETHUSDT") {
-              if (!res) res = null;
-              else if ((res.score || 0) < this.env.SECONDARY_MIN_SCORE) res = null;
+            if (tfArg && isSwingTfLocal(tfArg)) {
+              res = await this.pipeline.scanPairSwing(symbolArg);
+            } else {
+              const intr = await this.pipeline.scanPairIntraday(symbolArg);
+              intradayPlans = intr?.ok ? [intr] : [];
+              res = intradayPlans.length ? { ok: true, __intradayOnly: true } : null;
             }
           }
 
@@ -1039,7 +1052,14 @@ export class Commands {
       if (out.kind !== "OK") return;
 
       let res = out.result;
-      if (!res || !res.ok || res.score < 70 || res.scoreLabel === "NO SIGNAL") {
+      const swingRes = (res && res.ok && !res.__intradayOnly) ? res : null;
+      const swingOk = !!(swingRes && swingRes.ok && (swingRes.score || 0) >= 70 && swingRes.scoreLabel !== "NO SIGNAL");
+      const hasIntraday = Array.isArray(intradayPlans) && intradayPlans.length > 0;
+      const intradayOnly = !!(tfArg && !isSwingTfLocal(tfArg));
+      const swingOnly = !!(tfArg && isSwingTfLocal(tfArg));
+      const dualSections = !tfArg;
+
+      if (!swingOk && !hasIntraday) {
         await this.signalsRepo.logScanNoSignal({
           chatId,
           query: { symbol: symbolUsed || null, tf: tfArg || null, raw: raw || "" },
@@ -1049,18 +1069,86 @@ export class Commands {
 
         try {
           if (symbolUsed) {
-            const diags = this.pipeline.explainPair(symbolUsed);
-            await this.sender.sendText(chatId, formatExplain({
-              symbol: symbolUsed,
-              diags,
-              tfExplicit: null,
-              rotationNote: false
-            }));
+            if (intradayOnly) {
+              await this.sender.sendText(chatId, [
+                "CLOUD TREND ALERT",
+                "━━━━━━━━━━━━━━━━━━",
+                "INTRADAY",
+                "No intraday trade plan found."
+              ].join("\n"));
+            } else {
+              const diags = this.pipeline.explainPair(symbolUsed);
+              await this.sender.sendText(chatId, formatExplain({
+                symbol: symbolUsed,
+                diags,
+                tfExplicit: null,
+                rotationNote: false
+              }));
+            }
           }
         } catch {}
 
         return;
       }
+
+      const sendSectionHeader = async (title) => {
+        await this.sender.sendText(chatId, [
+          "CLOUD TREND ALERT",
+          "━━━━━━━━━━━━━━━━━━",
+          title
+        ].join("\n"));
+      };
+
+      // INTRADAY section (Trade Plan)
+      if (hasIntraday || dualSections || intradayOnly) {
+        await sendSectionHeader("INTRADAY");
+
+        const sentSymbols = new Set();
+        let intradaySent = 0;
+
+        if (hasIntraday) {
+          for (const plan of intradayPlans) {
+            const sym = String(plan?.symbol || "").toUpperCase();
+            if (!sym || sentSymbols.has(sym)) continue;
+            sentSymbols.add(sym);
+
+            const cooldownKey = `${sym}:intraday`;
+            const canSend = typeof this.stateRepo?.canSendSymbol === "function"
+              ? this.stateRepo.canSendSymbol(cooldownKey, INTRADAY_COOLDOWN_MINUTES)
+              : true;
+            if (!canSend) continue;
+
+            const msg = await this.sender.sendText(chatId, tradePlanCard(plan));
+            if (msg) {
+              intradaySent++;
+              try { await incGroupStat(chatId, todayKey, "scanSignalsSent", 1); } catch {}
+            }
+            try { this.stateRepo?.markSent?.(cooldownKey); } catch {}
+          }
+        }
+
+        if (!hasIntraday) {
+          await this.sender.sendText(chatId, "No intraday trade plan found.");
+        }
+
+        if (intradaySent) {
+          try { await this.stateRepo.flush(); } catch {}
+        }
+      }
+
+      if (!swingOk) {
+        if (dualSections || swingOnly) {
+          await sendSectionHeader(`SWING (${String(this.env?.SECONDARY_TIMEFRAME || "4h")})`);
+          await this.sender.sendText(chatId, "No swing signal found.");
+        }
+        return;
+      }
+
+      if (dualSections || swingOnly) {
+        await sendSectionHeader(`SWING (${String(this.env?.SECONDARY_TIMEFRAME || "4h")})`);
+      }
+
+      res = swingRes;
 
 
       // LOCK: normalize playbook + guardrails for dual picks (Intraday vs Swing)
@@ -1084,6 +1172,10 @@ export class Commands {
           console.info("[SCAN]", evt);
         }
       };
+
+      // Intraday plans are handled separately; keep legacy dual-pick logic disabled.
+      const allowLegacyDual = false;
+      secondaryPick = null;
 
       const ensurePlaybook = (sig) => {
         try {
@@ -1186,7 +1278,7 @@ export class Commands {
       }
 
       // secondary_fill_intraday: fill missing/invalid intraday candidate in rotation mode
-      if (rotationMode && (!secondaryPick || samePairOpposite) && typeof this.pipeline.scanBestIntraday === "function") {
+      if (allowLegacyDual && rotationMode && (!secondaryPick || samePairOpposite) && typeof this.pipeline.scanBestIntraday === "function") {
         try {
           const primarySym = res?.symbol;
           const exclude = Array.from(new Set([...(activeSymbols || []), primarySym].filter(Boolean)));
@@ -1217,6 +1309,22 @@ export class Commands {
       // Guardrails + confluence shaping (LOCK)
       let onlyOneCard = applyGuardrails();
 
+      const swingCooldownKey = `${String(res?.symbol || "").toUpperCase()}:swing`;
+      const swingCooldownOk = typeof this.stateRepo?.canSendSymbol === "function"
+        ? this.stateRepo.canSendSymbol(swingCooldownKey, this.env.COOLDOWN_MINUTES)
+        : true;
+      if (!swingCooldownOk) {
+        try {
+          await this.signalsRepo.logScanThrottled({
+            chatId,
+            query: { symbol: symbolUsed || null, tf: res?.tf || null, raw: raw || "" },
+            meta: { reason: "COOLDOWN_SWING" }
+          });
+        } catch {}
+        scanLog("cooldown_swing", { symbol: normSym(res?.symbol), tf: String(res?.tf || "") });
+        return;
+      }
+
       let primarySent = false;
       let secondarySent = false;
       let primaryDuplicatePos = null;
@@ -1240,7 +1348,7 @@ export class Commands {
 
       
 // If primary is duplicate in rotation-mode /scan, try fallback (LOCK: never stop early)
-if (rotationMode && primaryDuplicatePos) {
+if (allowLegacyDual && rotationMode && primaryDuplicatePos) {
   const primarySym = res.symbol;
   const secondarySym = secondaryPick?.symbol || null;
   const exclude = Array.from(new Set([...(activeSymbols || []), primarySym, secondarySym].filter(Boolean)));
@@ -1335,6 +1443,7 @@ if (primaryDuplicatePos) {
         if (typeof this.stateRepo.bumpScanSignalsSent === "function") this.stateRepo.bumpScanSignalsSent(res.tf);
         else this.stateRepo.bumpScan(res.tf);
         if (typeof this.stateRepo.markSentPairTf === "function") this.stateRepo.markSentPairTf(res.symbol, res.tf);
+        if (typeof this.stateRepo.markSent === "function") this.stateRepo.markSent(swingCooldownKey);
         await this.stateRepo.flush();
       } catch {}
       // log entry
