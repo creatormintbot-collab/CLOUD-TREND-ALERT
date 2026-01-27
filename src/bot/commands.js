@@ -7,6 +7,7 @@ import { infoCard } from "./cards/infoCard.js";
 import { buildOverlays } from "../charts/layout.js";
 import { renderEntryChart } from "../charts/renderer.js";
 import { createPositionFromSignal } from "../positions/positionModel.js";
+import { inc as incGroupStat, readDay as readGroupStatsDay } from "../storage/groupStatsRepo.js";
 function utcDateKeyNow() {
   return new Date().toISOString().slice(0, 10);
 }
@@ -169,6 +170,28 @@ async function readSignalsDayStats(signalsRepo, dayKey) {
     return stats;
   } catch {
     return null;
+  }
+}
+
+function normalizeGroupStats(stats) {
+  const s = stats && typeof stats === "object" ? stats : {};
+  const toNum = (value) => {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : 0;
+  };
+  return {
+    autoSignalsSent: toNum(s.autoSignalsSent),
+    scanSignalsSent: toNum(s.scanSignalsSent),
+    scanRequestsSuccess: toNum(s.scanRequestsSuccess)
+  };
+}
+
+async function readGroupDayStats(chatId, dateKey) {
+  try {
+    const day = await readGroupStatsDay(chatId, dateKey);
+    return normalizeGroupStats(day);
+  } catch {
+    return normalizeGroupStats(null);
   }
 }
 
@@ -474,14 +497,15 @@ export class Commands {
 
 
     this.bot.onText(/^\/status\b/i, async (msg) => {
+      const chatId = msg.chat.id;
       const dateKey = utcDateKeyNow();
       const timeKey = utcTimeNow();
 
-      const createdStats = await resolveCreatedStats({
-        dateKey,
-        stateRepo: this.stateRepo,
-        signalsRepo: this.signalsRepo
-      });
+      const groupStats = await readGroupDayStats(chatId, dateKey);
+      const autoSent = groupStats.autoSignalsSent;
+      const scanSignalsSent = groupStats.scanSignalsSent;
+      const scanOk = groupStats.scanRequestsSuccess;
+      const totalCreated = autoSent + scanSignalsSent;
 
       const all = await listAllPositions(this.positionsRepo);
       const active = Array.isArray(this.positionsRepo.listActive?.()) ? this.positionsRepo.listActive() : all.filter(isActivePos);
@@ -508,13 +532,14 @@ export class Commands {
       const winCount = closedCounts.tp1 + closedCounts.tp2 + closedCounts.tp3;
 
       await this.sender.sendText(
-        msg.chat.id,
+        chatId,
         statusCard({
           dateKey,
           timeKey,
-          autoSent: createdStats.autoSent,
-          scanSignalsSent: createdStats.scanSignalsSent,
-          totalCreated: createdStats.totalCreated,
+          autoSent,
+          scanSignalsSent,
+          scanOk,
+          totalCreated,
           entryHits,
           closedCount: closedTodayList.length,
           winCount,
@@ -739,6 +764,7 @@ export class Commands {
     });
 
     this.bot.onText(/^\/info\b(.*)$/i, async (msg, match) => {
+      const chatId = msg.chat.id;
       const raw = (match?.[1] || "").trim();
       const args = raw ? raw.split(/\s+/).filter(Boolean) : [];
 
@@ -751,21 +777,27 @@ export class Commands {
 
       if (!dateKey) {
         await this.sender.sendText(
-          msg.chat.id,
+          chatId,
           "Usage: /info or /info YYYY-MM-DD"
         );
         return;
       }
 
       if (dateKey === todayKey) {
-        await this.sender.sendText(msg.chat.id, "Use /status for today. /info is for previous days (UTC).");
+        await this.sender.sendText(chatId, "Use /status for today. /info is for previous days (UTC).");
         return;
       }
 
       if (!validKeys.includes(dateKey)) {
-        await this.sender.sendText(msg.chat.id, "Date out of range. Available: last 7 days (UTC).");
+        await this.sender.sendText(chatId, "Date out of range. Available: last 7 days (UTC).");
         return;
       }
+
+      const groupStats = await readGroupDayStats(chatId, dateKey);
+      const autoSent = groupStats.autoSignalsSent;
+      const scanSignalsSent = groupStats.scanSignalsSent;
+      const scanOk = groupStats.scanRequestsSuccess;
+      const totalCreated = autoSent + scanSignalsSent;
 
       const createdStats = await resolveCreatedStats({
         dateKey,
@@ -787,13 +819,13 @@ export class Commands {
       const macroCounts = macroCountsFromDay(createdStats.day);
 
       await this.sender.sendText(
-        msg.chat.id,
+        chatId,
         infoCard({
           dateKey,
-          totalCreated: createdStats.totalCreated,
-          autoSent: createdStats.autoSent,
-          scanSignalsSent: createdStats.scanSignalsSent,
-          scanOk: createdStats.scanOk,
+          totalCreated,
+          autoSent,
+          scanSignalsSent,
+          scanOk,
           entryHits,
           closedCount: closedList.length,
           winCount,
@@ -808,6 +840,7 @@ export class Commands {
     this.bot.onText(/^\/scan\b(.*)$/i, async (msg, match) => {
       const chatId = msg.chat.id;
       const userId = msg.from?.id ?? 0;
+      const todayKey = utcDateKeyNow();
 
       const raw = (match?.[1] || "").trim();
       const args = raw ? raw.split(/\s+/).filter(Boolean) : [];
@@ -863,6 +896,9 @@ export class Commands {
           this.stateRepo.bumpScanRequest();
           await this.stateRepo.flush();
         }
+      } catch {}
+      try {
+        await incGroupStat(chatId, todayKey, "scanRequestsSuccess", 1);
       } catch {}
 
 
@@ -1288,6 +1324,11 @@ if (primaryDuplicatePos) {
       await this.sender.sendPhoto(chatId, png);
 
       const entryMsg = await this.sender.sendText(chatId, entryCard(res));
+      if (entryMsg) {
+        try {
+          await incGroupStat(chatId, todayKey, "scanSignalsSent", 1);
+        } catch {}
+      }
 
       // counters
       try {
@@ -1356,6 +1397,11 @@ if (primaryDuplicatePos) {
             await this.sender.sendPhoto(chatId, png2);
 
             const entryMsg2 = await this.sender.sendText(chatId, entryCard(secondaryPick));
+            if (entryMsg2) {
+              try {
+                await incGroupStat(chatId, todayKey, "scanSignalsSent", 1);
+              } catch {}
+            }
 
             // counters
             try {

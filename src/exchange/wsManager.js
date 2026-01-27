@@ -15,12 +15,15 @@ export class WsManager {
     this._disabled = false;
 
     this._streams = [];
-    this._sockets = []; // { id, streams, ws, attempt, timer, open }
+    this._sockets = []; // { id, streams, ws, attempt, timer, open, generation, connId }
     this._nextId = 1;
 
     // telemetry
     this._lastMessageAt = 0;
     this._lastOpenAt = 0;
+
+    this._generation = 0;
+    this._setStreamsLock = Promise.resolve();
   }
 
   setHandler(fn) {
@@ -59,17 +62,84 @@ export class WsManager {
     return `${prefix}${streams.join("/")}`;
   }
 
-  async setStreams(streams) {
-    const ok = await this._ensureWsLoaded();
-    this._streams = Array.from(new Set((streams || []).filter(Boolean)));
-
-    if (!ok) return;
-
-    const chunks = chunkArray(this._streams, this.maxStreamsPerSocket);
-    await this._reconcileSockets(chunks);
+  _readyStateName(state) {
+    switch (state) {
+      case 0: return "CONNECTING";
+      case 1: return "OPEN";
+      case 2: return "CLOSING";
+      case 3: return "CLOSED";
+      default: return String(state);
+    }
   }
 
-  async _reconcileSockets(chunks) {
+  _socketMeta(sock, reason, wsOverride) {
+    const ws = wsOverride || sock?.ws;
+    const rs = ws?.readyState;
+    return {
+      wsId: sock?.id,
+      readyState: this._readyStateName(rs),
+      readyStateCode: Number.isFinite(rs) ? rs : undefined,
+      reason,
+      generation: sock?.generation,
+      connId: sock?.connId
+    };
+  }
+
+  _isStale(sock) {
+    return !sock || sock.generation !== this._generation;
+  }
+
+  _isRecoverableWsError(err, sock, ws) {
+    const msg = String(err?.message || err || "");
+    if (!msg) return false;
+    const lowered = msg.toLowerCase();
+    if (!lowered.includes("closed before the connection was established")) return false;
+
+    const rs = ws?.readyState;
+    const connecting = rs === 0;
+    const reason = sock?.closeReason || sock?._closing;
+
+    if (connecting) return true;
+    if (reason && String(reason).startsWith("reconcile")) return true;
+    return false;
+  }
+
+  _safeClose(ws, sock, reason) {
+    if (!ws) return;
+
+    const rs = ws.readyState;
+    try {
+      if (rs === 0) {
+        if (typeof ws.terminate === "function") ws.terminate();
+        return;
+      }
+      if (typeof ws.close === "function" && rs !== 3) ws.close();
+    } catch (err) {
+      const meta = this._socketMeta(sock, reason, ws);
+      meta.errorMessage = String(err?.message || err || "");
+      this.logger?.debug?.(`[ws:${sock?.id}] safeClose error`, meta);
+    }
+  }
+
+  async setStreams(streams) {
+    const desired = Array.from(new Set((streams || []).filter(Boolean)));
+
+    const run = async () => {
+      const ok = await this._ensureWsLoaded();
+      this._streams = desired;
+      const generation = ++this._generation;
+
+      if (!ok) return;
+
+      const chunks = chunkArray(this._streams, this.maxStreamsPerSocket);
+      await this._reconcileSockets(chunks, generation);
+    };
+
+    this._setStreamsLock = (this._setStreamsLock || Promise.resolve()).then(run, run);
+    return this._setStreamsLock;
+  }
+
+  async _reconcileSockets(chunks, generation) {
     while (this._sockets.length > chunks.length) {
       const s = this._sockets.pop();
       this._closeSocket(s, "reconcile_extra");
@@ -79,7 +149,13 @@ export class WsManager {
       const desired = chunks[i];
       const existing = this._sockets[i];
 
-      if (existing && this._sameStreams(existing.streams, desired)) continue;
+      if (existing && this._sameStreams(existing.streams, desired)) {
+        existing.streams = desired;
+        existing.generation = generation;
+        existing._closing = null;
+        existing.closeReason = null;
+        continue;
+      }
 
       if (existing) this._closeSocket(existing, "reconcile_update");
 
@@ -89,7 +165,11 @@ export class WsManager {
         ws: null,
         attempt: 0,
         timer: null,
-        open: false
+        open: false,
+        generation,
+        connId: 0,
+        closeReason: null,
+        _closing: null
       };
 
       this._sockets[i] = sock;
@@ -106,20 +186,34 @@ export class WsManager {
 
   _connect(sock) {
     if (this._disabled || !this._WS) return;
+    if (this._isStale(sock)) return;
+    if (sock._closing && sock._closing !== "reconnect") return;
 
     const url = this._buildUrl(sock.streams);
     const ws = new this._WS(url, { handshakeTimeout: 10_000 });
+    const connId = (sock.connId || 0) + 1;
+
     sock.ws = ws;
+    sock.connId = connId;
     sock.open = false;
+    sock._closing = null;
+    sock.closeReason = null;
+
+    const isCurrent = () => sock.ws === ws && sock.connId === connId && !this._isStale(sock);
 
     ws.on("open", () => {
+      if (!isCurrent()) return;
       sock.attempt = 0;
       sock.open = true;
       this._lastOpenAt = Date.now();
-      this.logger?.info?.(`[ws:${sock.id}] connected streams=${sock.streams.length}`);
+      this.logger?.info?.(
+        `[ws:${sock.id}] connected streams=${sock.streams.length}`,
+        this._socketMeta(sock, "open", ws)
+      );
     });
 
     ws.on("message", (buf) => {
+      if (!isCurrent()) return;
       this._lastMessageAt = Date.now();
       if (!this._handler) return;
 
@@ -133,18 +227,39 @@ export class WsManager {
     });
 
     ws.on("error", (err) => {
-      this.logger?.warn?.(`[ws:${sock.id}] error: ${err?.message || err}`);
+      if (!isCurrent()) return;
+      const msg = String(err?.message || err || "");
+      const meta = this._socketMeta(sock, sock.closeReason || "error", ws);
+      meta.errorMessage = msg;
+
+      if (this._isRecoverableWsError(err, sock, ws)) {
+        this.logger?.warn?.(`[ws:${sock.id}] error (recoverable)`, meta);
+        return;
+      }
+
+      this.logger?.warn?.(`[ws:${sock.id}] error`, meta);
     });
 
-    ws.on("close", () => {
+    ws.on("close", (code, reason) => {
+      if (!isCurrent()) return;
       sock.open = false;
-      this.logger?.warn?.(`[ws:${sock.id}] closed`);
+
+      if (sock._closing) return;
+
+      const meta = this._socketMeta(sock, sock.closeReason || "close", ws);
+      if (code !== undefined) meta.closeCode = code;
+      const reasonStr = typeof reason?.toString === "function" ? reason.toString() : reason;
+      if (reasonStr) meta.closeReason = reasonStr;
+
+      this.logger?.warn?.(`[ws:${sock.id}] closed`, meta);
       this._scheduleReconnect(sock);
     });
   }
 
   _scheduleReconnect(sock) {
     if (this._disabled) return;
+    if (this._isStale(sock)) return;
+    if (sock._closing) return;
 
     if (sock.timer) clearTimeout(sock.timer);
     sock.attempt = (sock.attempt || 0) + 1;
@@ -155,28 +270,34 @@ export class WsManager {
 
     sock.timer = setTimeout(() => {
       sock.timer = null;
+      if (this._disabled || this._isStale(sock) || sock._closing) return;
       this._closeSocket(sock, "reconnect");
       this._connect(sock);
     }, delay);
   }
 
   _closeSocket(sock, reason) {
+    if (!sock) return;
+
     try {
-      if (sock?.timer) clearTimeout(sock.timer);
+      if (sock.timer) clearTimeout(sock.timer);
       sock.timer = null;
     } catch {}
 
+    sock.open = false;
+    sock.closeReason = reason;
+    sock._closing = reason;
+
+    const ws = sock.ws;
+    const meta = this._socketMeta(sock, reason, ws);
+
     try {
-      if (sock?.ws) {
-        sock.ws.removeAllListeners?.();
-        sock.ws.close?.();
-      }
+      if (ws) this._safeClose(ws, sock, reason);
     } catch {}
 
     sock.ws = null;
-    sock.open = false;
 
-    this.logger?.info?.(`[ws:${sock?.id}] closed (${reason})`);
+    this.logger?.info?.(`[ws:${sock.id}] closed (${reason})`, meta);
   }
 
   async stop() {

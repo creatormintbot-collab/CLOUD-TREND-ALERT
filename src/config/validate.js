@@ -5,7 +5,7 @@ export function validateEnvOrThrow() {
   if (!env.BINANCE_FUTURES_REST) throw new Error("Missing BINANCE_FUTURES_REST");
   if (!env.BINANCE_FUTURES_WS) throw new Error("Missing BINANCE_FUTURES_WS");
   if (Number(env.SL_ATR_MULT) !== 1.6) throw new Error("SL_ATR_MULT is LOCKED to 1.6");
-  if (env.DAILY_RECAP) {
+  if (env.DAILY_RECAP === true) {
     if (!env.DAILY_RECAP_UTC || env.DAILY_RECAP_UTC.split(":").length !== 2) {
       throw new Error("DAILY_RECAP_UTC must be HH:MM");
     }

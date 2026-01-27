@@ -16,6 +16,7 @@ import { PositionsRepo } from "../storage/positionsRepo.js";
 import { RotationRepo } from "../storage/rotationRepo.js";
 import { SignalsRepo } from "../storage/signalsRepo.js";
 import { KlinesRepo } from "../storage/klinesRepo.js";
+import { inc as incGroupStat } from "../storage/groupStatsRepo.js";
 
 import { Ranker } from "../selection/ranker.js";
 import { Pipeline } from "../selection/pipeline.js";
@@ -27,7 +28,6 @@ import { Commands } from "../bot/commands.js";
 
 import { startAutoScanJob } from "../jobs/autoScanJob.js";
 import { startMonitorJob } from "../jobs/monitorJob.js";
-import { startDailyRecapJob } from "../jobs/dailyRecapJob.js";
 import { startUniverseRefreshJob } from "../jobs/universeRefreshJob.js";
 import { startKlinesPersistJob } from "../jobs/klinesPersistJob.js";
 import { startRestSyncJob } from "../jobs/restSyncJob.js";
@@ -45,6 +45,7 @@ import { recapCard } from "../bot/cards/recapCard.js";
 
 import { buildOverlays } from "../charts/layout.js";
 import { renderEntryChart } from "../charts/renderer.js";
+import { utcDateKey } from "../utils/time.js";
 
 export async function bootstrap() {
   validateEnvOrThrow();
@@ -157,6 +158,7 @@ export async function bootstrap() {
 
   const todayAuto = stateRepo.getAutoTotalToday();
   if (todayAuto >= env.MAX_SIGNALS_PER_DAY) return;
+  const todayKey = utcDateKey();
 
   let advanced = false;
   for (const tf of [...env.SCAN_TIMEFRAMES, env.SECONDARY_TIMEFRAME]) {
@@ -266,6 +268,11 @@ export async function bootstrap() {
       await sender.sendPhoto(chatId, png);
       const msg = await sender.sendText(chatId, entryCard(sig));
       if (msg?.message_id) entryMessageIds[String(chatId)] = msg.message_id;
+      if (msg) {
+        try {
+          await incGroupStat(chatId, todayKey, "autoSignalsSent", 1);
+        } catch {}
+      }
     }
 
     const pos = createPositionFromSignal(sig, {
@@ -410,9 +417,7 @@ export async function bootstrap() {
   const autoJob = startAutoScanJob({ run: runAuto });
   const monitorJob = startMonitorJob({ intervalSec: env.PRICE_MONITOR_INTERVAL_SEC, run: runMonitor });
   let recapJob = null;
-  if (env.DAILY_RECAP) {
-    recapJob = startDailyRecapJob({ hhmmUTC: env.DAILY_RECAP_UTC, run: runRecap });
-  }
+  // Daily recap job is disabled (manual /info only).
   const universeJob = startUniverseRefreshJob({ hours: env.UNIVERSE_REFRESH_HOURS, run: runUniverseRefresh });
 
   logger.info("bootstrap_done");

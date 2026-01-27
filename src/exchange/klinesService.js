@@ -51,6 +51,9 @@ export class KlinesService {
     this._lastClosed = new Map(); // key -> last closeTime
     this._tfLast = new Map();     // tf -> max closeTime among all symbols
     this._patchLocks = new Map();
+    this._subscribePending = null;
+    this._subscribeRunner = null;
+    this._lastSubscribeKey = "";
 
     if (this.ws) this.ws.setHandler((msg) => this._onWsMessage(msg));
   }
@@ -153,7 +156,32 @@ export class KlinesService {
 
     const streams = [];
     for (const s of symList) for (const tf of tfList) streams.push(`${s.toLowerCase()}@kline_${tf}`);
-    await this.ws.setStreams(streams);
+    const deduped = Array.from(new Set(streams)).sort();
+    const key = deduped.join(",");
+
+    if (key === this._lastSubscribeKey && !this._subscribeRunner && !this._subscribePending) return;
+
+    this._subscribePending = { streams: deduped, key };
+    if (!this._subscribeRunner) this._subscribeRunner = this._runSubscribeQueue();
+    return this._subscribeRunner;
+  }
+
+  async _runSubscribeQueue() {
+    while (this._subscribePending) {
+      const next = this._subscribePending;
+      this._subscribePending = null;
+
+      if (!next || next.key === this._lastSubscribeKey) continue;
+
+      try {
+        await this.ws.setStreams(next.streams);
+        this._lastSubscribeKey = next.key;
+      } catch (e) {
+        this.logger?.warn?.(`[klines] subscribe failed: ${e?.message || e}`);
+      }
+    }
+
+    this._subscribeRunner = null;
   }
 
   async _onWsMessage(msg) {

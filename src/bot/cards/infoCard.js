@@ -25,6 +25,9 @@ export function infoCard({
   bearCount = 0,
   neutralCount = 0
 } = {}) {
+  const created = Number.isFinite(Number(totalCreated))
+    ? Number(totalCreated)
+    : num(autoSent) + num(scanSignalsSent);
   const closed = num(closedCount);
   const winrate = pct(winCount, closed);
   const slRate = pct(directSlCount, closed);
@@ -36,7 +39,7 @@ export function infoCard({
     `📅 Date: ${dateKey}`,
     "",
     "🧠 Activity (Created That Day)",
-    `• Signals Created: ${num(totalCreated)} (AUTO ${num(autoSent)} | /scan ${num(scanSignalsSent)})`,
+    `• Signals Created: ${num(created)} (AUTO ${num(autoSent)} | /scan ${num(scanSignalsSent)})`,
     `• /scan Requests (success): ${num(scanOk)}`,
     `• Signals Sent: AUTO ${num(autoSent)} | /scan ${num(scanSignalsSent)}`,
     "",

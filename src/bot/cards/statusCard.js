@@ -9,6 +9,7 @@ export function statusCard({
   totalCreated = 0,
   autoSent = 0,
   scanSignalsSent = 0,
+  scanOk = 0,
   entryHits = 0,
   closedCount = 0,
   winCount = 0,
@@ -20,6 +21,10 @@ export function statusCard({
   intradayCount = 0,
   swingCount = 0
 } = {}) {
+  const created = Number.isFinite(Number(totalCreated))
+    ? Number(totalCreated)
+    : num(autoSent) + num(scanSignalsSent);
+
   return [
     "CLOUD TREND ALERT",
     "━━━━━━━━━━━━━━━━━━",
@@ -27,7 +32,8 @@ export function statusCard({
     `📅 Today: ${dateKey} | 🕒 Now: ${timeKey}`,
     "",
     "🤖 TODAY (Events)",
-    `• Signals Created: ${num(totalCreated)} (AUTO ${num(autoSent)} | /scan ${num(scanSignalsSent)})`,
+    `• Signals Created: ${num(created)} (AUTO ${num(autoSent)} | /scan ${num(scanSignalsSent)})`,
+    `• /scan Requests (success): ${num(scanOk)}`,
     `• Entry Hits: ${num(entryHits)}`,
     `• Closed: ${num(closedCount)} (Win≥TP1 ${num(winCount)} | Direct SL ${num(directSlCount)} | Giveback ${num(givebackCount)})`,
     "",
