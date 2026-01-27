@@ -2,13 +2,29 @@ import { ema } from "../strategy/indicators/ema.js";
 import { rsi } from "../strategy/indicators/rsi.js";
 import { atr } from "../strategy/indicators/atr.js";
 
+function normTf(tf) {
+  return String(tf || "").trim().toLowerCase();
+}
+
+function intradayBiasTf(signalTf) {
+  return normTf(signalTf) === "1h" ? "4h" : "1h";
+}
+
 export class Ranker {
   constructor({ klines }) {
     this.klines = klines;
   }
 
-  fastScoreIntraday(symbol, thresholds) {
-    const candles = this.klines.getCandles(symbol, "1h");
+  fastScoreIntraday(symbol, signalTf, thresholds) {
+    let tf = signalTf;
+    let thr = thresholds;
+    if (thr === undefined && signalTf && typeof signalTf === "object") {
+      thr = signalTf;
+      tf = "15m";
+    }
+
+    const biasTf = intradayBiasTf(tf);
+    const candles = this.klines.getCandles(symbol, biasTf);
     if (!candles || candles.length < 220) return 0;
 
     const closes = candles.map((c) => Number(c.close));
@@ -30,8 +46,9 @@ export class Ranker {
 
     let s = 60; // bias gate
 
-    if (atrPct >= thresholds.ATR_PCT_MIN) s += 20;
-    else if (atrPct >= thresholds.ATR_PCT_MIN * 0.7) s += 10;
+    const atrMin = Number(thr?.ATR_PCT_MIN ?? 0);
+    if (atrPct >= atrMin) s += 20;
+    else if (atrPct >= atrMin * 0.7) s += 10;
 
     const ema50Series = ema(closes, 50);
     const prev = ema50Series.at(-6);

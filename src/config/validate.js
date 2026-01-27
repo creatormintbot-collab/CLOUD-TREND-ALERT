@@ -27,6 +27,10 @@ export function validateEnvOrThrow() {
     const badAuto = env.AUTO_TIMEFRAMES.filter((tf) => !allowedTfs.has(String(tf).toLowerCase()));
     if (badAuto.length) throw new Error(`AUTO_TIMEFRAMES contains invalid timeframe(s): ${badAuto.join(", ")}`);
   }
+  if (Array.isArray(env.INTRADAY_TIMEFRAMES) && env.INTRADAY_TIMEFRAMES.length) {
+    const badIntraday = env.INTRADAY_TIMEFRAMES.filter((tf) => !allowedTfs.has(String(tf).toLowerCase()));
+    if (badIntraday.length) throw new Error(`INTRADAY_TIMEFRAMES contains invalid timeframe(s): ${badIntraday.join(", ")}`);
+  }
 
   // Strategy validation (optional)
   const strategy = String(env.STRATEGY || "").trim();

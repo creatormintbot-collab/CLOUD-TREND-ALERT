@@ -788,6 +788,6 @@ export function explainSignal({ symbol, tf, klines, thresholds, env = {}, isAuto
   };
 }
 
-export function evaluateIntradayTradePlan({ symbol, klines, thresholds, env = {} } = {}) {
-  return intradaySrTradePlan({ symbol, klines, thresholds, env });
+export function evaluateIntradayTradePlan({ symbol, tf, klines, thresholds, env = {} } = {}) {
+  return intradaySrTradePlan({ symbol, tf, klines, thresholds, env });
 }

@@ -1,7 +1,7 @@
 import { evaluateSignal, explainSignal, evaluateIntradayTradePlan } from "../strategy/signalEngine.js";
 import { macdGate } from "../strategy/scoring/proScore.js";
 import { macd } from "../strategy/indicators/macd.js";
-import { INTRADAY_SCAN_TOP_N, INTRADAY_MIN_CANDLES, SWING_SCAN_TOP_N } from "../config/constants.js";
+import { INTRADAY_SCAN_TOP_N, INTRADAY_MIN_CANDLES, INTRADAY_TIMEFRAMES, SWING_SCAN_TOP_N } from "../config/constants.js";
 
 
 function normTf(tf) {
@@ -33,7 +33,19 @@ export class Pipeline {
   }
 
   _intradayTfs() {
-    return ["15m", "1h", "12h"];
+    const signalTfs = this._intradaySignalTfs();
+    const biasTfs = signalTfs.map((tf) => this._intradayBiasTf(tf));
+    return Array.from(new Set([...signalTfs, ...biasTfs, "12h"]));
+  }
+
+  _intradaySignalTfs() {
+    const base = Array.isArray(INTRADAY_TIMEFRAMES) ? INTRADAY_TIMEFRAMES : [];
+    const tfs = base.length ? base : ["15m", "30m", "1h"];
+    return tfs.map((tf) => normTf(tf)).filter(Boolean);
+  }
+
+  _intradayBiasTf(signalTf) {
+    return normTf(signalTf) === "1h" ? "4h" : "1h";
   }
 
   _autoTimeframes() {
@@ -145,10 +157,10 @@ async _maybeWarmupKlines(symbols, tfs, reason = "scan", opts = {}) {
 
   async scanPairTf(symbol, tf) {
     if (isSwingTf(tf, this.env)) return this.scanPairSwing(symbol);
-    return this.scanPairIntraday(symbol);
+    return this.scanPairIntraday(symbol, tf);
   }
 
-  async scanPairIntraday(symbol) {
+  async scanPairIntraday(symbol, tf) {
     const sym = String(symbol || "").toUpperCase();
     if (!sym) return null;
 
@@ -156,13 +168,21 @@ async _maybeWarmupKlines(symbols, tfs, reason = "scan", opts = {}) {
       await this._maybeWarmupKlines([sym], this._intradayTfs(), "scanPairIntraday", { minCandles: INTRADAY_MIN_CANDLES, maxSyms: 1, retryMs: 60000 });
     } catch {}
 
-    const r = evaluateIntradayTradePlan({
-      symbol: sym,
-      klines: this.klines,
-      thresholds: this.thresholds,
-      env: this.env
-    });
-    return r?.ok ? r : null;
+    const signalTfs = tf ? [normTf(tf)] : this._intradaySignalTfs();
+    let best = null;
+
+    for (const signalTf of signalTfs) {
+      const r = evaluateIntradayTradePlan({
+        symbol: sym,
+        tf: signalTf,
+        klines: this.klines,
+        thresholds: this.thresholds,
+        env: this.env
+      });
+      if (r?.ok && (!best || (r.score || 0) > (best.score || 0))) best = r;
+    }
+
+    return best;
   }
 
   async scanPairSwing(symbol) {
@@ -189,7 +209,7 @@ async _maybeWarmupKlines(symbols, tfs, reason = "scan", opts = {}) {
   }
 
   // Dual Playbook scan for a single pair (LOCKED):
-  // - INTRADAY: SR Trade Plan (15m/1h/12h)
+  // - INTRADAY: SR Trade Plan (15m/30m/1h signals + 1h/4h bias + 12h macro)
   // - SWING: 4h (SECONDARY_TIMEFRAME)
   // Returns { primary, secondary } where primary is preferred (SWING when available).
 
@@ -235,27 +255,32 @@ async _maybeWarmupKlines(symbols, tfs, reason = "scan", opts = {}) {
       await this._maybeWarmupKlines(warmSymbols, this._intradayTfs(), "scanIntradayPlans", { minCandles: INTRADAY_MIN_CANDLES, maxSyms: 12 });
     } catch {}
 
-    const scored = [];
-    for (const sym of symbols) {
-      const fast = typeof this.ranker.fastScoreIntraday === "function"
-        ? this.ranker.fastScoreIntraday(sym, this.thresholds)
-        : this.ranker.fastScore(sym, "1h", this.thresholds);
-      if (fast <= 0) continue;
-      scored.push({ symbol: sym, fast });
-    }
-
-    scored.sort((a, b) => b.fast - a.fast);
-    const shortlist = scored.slice(0, this.env.TOP10_PER_TF || 10);
-
     const candidates = [];
-    for (const row of shortlist) {
-      const res = evaluateIntradayTradePlan({
-        symbol: row.symbol,
-        klines: this.klines,
-        thresholds: this.thresholds,
-        env: this.env
-      });
-      if (res?.ok) candidates.push(res);
+    const signalTfs = this._intradaySignalTfs();
+
+    for (const signalTf of signalTfs) {
+      const scored = [];
+      for (const sym of symbols) {
+        const fast = typeof this.ranker.fastScoreIntraday === "function"
+          ? this.ranker.fastScoreIntraday(sym, signalTf, this.thresholds)
+          : this.ranker.fastScore(sym, this._intradayBiasTf(signalTf), this.thresholds);
+        if (fast <= 0) continue;
+        scored.push({ symbol: sym, tf: signalTf, fast });
+      }
+
+      scored.sort((a, b) => b.fast - a.fast);
+      const shortlist = scored.slice(0, this.env.TOP10_PER_TF || 10);
+
+      for (const row of shortlist) {
+        const res = evaluateIntradayTradePlan({
+          symbol: row.symbol,
+          tf: row.tf,
+          klines: this.klines,
+          thresholds: this.thresholds,
+          env: this.env
+        });
+        if (res?.ok) candidates.push(res);
+      }
     }
 
     candidates.sort((a, b) => (b.score || 0) - (a.score || 0));

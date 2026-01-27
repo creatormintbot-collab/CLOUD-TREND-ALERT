@@ -50,6 +50,10 @@ export const ENTRY_CONFIRM_DWELL_MS = Number(env.ENTRY_CONFIRM_DWELL_MS);  // re
 export const ENTRY_CONFIRM_MAX_WAIT_MS = Number(env.ENTRY_CONFIRM_MAX_WAIT_MS); // 0 = no max wait
 
 // === Intraday Trade Plan defaults ===
+const _INTRADAY_TFS = Array.isArray(env?.INTRADAY_TIMEFRAMES) && env.INTRADAY_TIMEFRAMES.length
+  ? env.INTRADAY_TIMEFRAMES
+  : ["15m", "30m", "1h"];
+export const INTRADAY_TIMEFRAMES = _INTRADAY_TFS.map((tf) => String(tf || "").toLowerCase()).filter(Boolean);
 export const INTRADAY_RR_CAP = 2.0;
 export const INTRADAY_SR_PIVOT_L = 3;
 export const INTRADAY_SR_PIVOT_R = 3;
@@ -57,6 +61,12 @@ export const INTRADAY_SR_ATR_MULT = 0.25;
 export const INTRADAY_SR_PCT_TOL = 0.002; // 0.20%
 export const INTRADAY_SL_ATR_BUFFER = 0.25;
 export const INTRADAY_SL_ATR_FALLBACK = 1.2;
+export const INTRADAY_SL_ATR_MULT = 0.6;
+export const INTRADAY_SL_FALLBACK_ATR_MULT = 1.5;
+export const INTRADAY_MIN_RISK_PCT = 1.0;
+export const INTRADAY_TP1_MIN_RR = 1.0;
+export const INTRADAY_MIN_GAP_ATR_MULT = 0.25;
+export const INTRADAY_MIN_GAP_PCT = 0.10; // percent
 export const INTRADAY_MACRO_ADJ = 10;
 export const INTRADAY_REGIME_ATR_PCT_MIN = 0.0025;
 export const INTRADAY_REGIME_SLOPE_LOOKBACK = 5;

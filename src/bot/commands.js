@@ -15,6 +15,7 @@ function mapIntradayPlanToSignal(plan = {}) {
   const sl = plan?.levels?.sl ?? plan?.sl;
   const tp1 = plan?.levels?.tp1 ?? plan?.tp1;
   const tp2 = plan?.levels?.tp2 ?? plan?.tp2;
+  const tp3 = plan?.levels?.tp3 ?? plan?.tp3;
 
   const tol = Number(plan?.tolerance);
   const zone = Number.isFinite(tol) ? tol : 0;
@@ -39,13 +40,14 @@ function mapIntradayPlanToSignal(plan = {}) {
   // Display includes TP3 to preserve the exact swing-card layout.
   const displaySignal = {
     ...base,
-    levels: { entryLow, entryHigh, entryMid, sl, tp1, tp2, tp3: tp2 }
+    candles: plan.candles || [],
+    levels: { entryLow, entryHigh, entryMid, sl, tp1, tp2, tp3 }
   };
 
-  // Position uses the actual intraday plan levels (no TP3).
+  // Position mirrors the plan levels for follow-up monitoring.
   const positionSignal = {
     ...base,
-    levels: { entryLow, entryHigh, entryMid, sl, tp1, tp2 }
+    levels: { entryLow, entryHigh, entryMid, sl, tp1, tp2, tp3 }
   };
 
   return { displaySignal, positionSignal };
@@ -990,7 +992,7 @@ export class Commands {
             if (tfArg && isSwingTfLocal(tfArg)) {
               res = await this.pipeline.scanPairSwing(symbolArg);
             } else {
-              const intr = await this.pipeline.scanPairIntraday(symbolArg);
+              const intr = await this.pipeline.scanPairIntraday(symbolArg, tfArg);
               intradayPlans = intr?.ok ? [intr] : [];
               res = intradayPlans.length ? { ok: true, __intradayOnly: true } : null;
             }
@@ -1110,12 +1112,7 @@ export class Commands {
         try {
           if (symbolUsed) {
             if (intradayOnly) {
-              await this.sender.sendText(chatId, [
-                "CLOUD TREND ALERT",
-                "━━━━━━━━━━━━━━━━━━",
-                "INTRADAY",
-                "No intraday trade plan found."
-              ].join("\n"));
+              await this.sender.sendText(chatId, "No intraday trade plan found.");
             } else {
               const diags = this.pipeline.explainPair(symbolUsed);
               await this.sender.sendText(chatId, formatExplain({
@@ -1131,18 +1128,8 @@ export class Commands {
         return;
       }
 
-      const sendSectionHeader = async (title) => {
-        await this.sender.sendText(chatId, [
-          "CLOUD TREND ALERT",
-          "━━━━━━━━━━━━━━━━━━",
-          title
-        ].join("\n"));
-      };
-
       // INTRADAY section (Trade Plan)
       if (hasIntraday || dualSections || intradayOnly) {
-        await sendSectionHeader("INTRADAY");
-
         const sentSymbols = new Set();
         let intradaySent = 0;
 
@@ -1159,6 +1146,11 @@ export class Commands {
             if (!canSend) continue;
 
             const { displaySignal, positionSignal } = mapIntradayPlanToSignal(plan);
+            // chart FIRST (ENTRY only)
+            const overlays = buildOverlays(displaySignal);
+            const png = await renderEntryChart(displaySignal, overlays);
+            await this.sender.sendPhoto(chatId, png);
+
             const entryMsg = await this.sender.sendText(chatId, entryCard(displaySignal));
             if (entryMsg) {
               intradaySent++;
@@ -1205,14 +1197,9 @@ export class Commands {
 
       if (!swingOk) {
         if (dualSections || swingOnly) {
-          await sendSectionHeader(`SWING (${String(this.env?.SECONDARY_TIMEFRAME || "4h")})`);
           await this.sender.sendText(chatId, "No swing signal found.");
         }
         return;
-      }
-
-      if (dualSections || swingOnly) {
-        await sendSectionHeader(`SWING (${String(this.env?.SECONDARY_TIMEFRAME || "4h")})`);
       }
 
       res = swingRes;

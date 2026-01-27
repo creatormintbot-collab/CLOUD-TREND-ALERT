@@ -46,6 +46,7 @@ export const env = {
 
   SCAN_TIMEFRAMES: list(process.env.SCAN_TIMEFRAMES || "15m,30m,1h").map((x) => x.toLowerCase()),
   SECONDARY_TIMEFRAME: (process.env.SECONDARY_TIMEFRAME || "4h").toLowerCase(),
+  INTRADAY_TIMEFRAMES: list(process.env.INTRADAY_TIMEFRAMES || "").map((x) => x.toLowerCase()),
   SECONDARY_MIN_SCORE: num(process.env.SECONDARY_MIN_SCORE, 80),
 
   // Strategy switch (optional). Empty = legacy scoring-only mode.
