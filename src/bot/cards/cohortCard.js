@@ -57,7 +57,7 @@ export function cohortDetailCard({
     "",
     "🧾 Since Created (D0→Now)",
     `• Entry Hits: ${num(entryHits)}`,
-    `• Closed: ${num(closedCount)} (Win≥TP1 ${num(winCount)} | Direct SL ${num(directSlCount)} | Giveback ${num(givebackCount)})`,
+    `• Closed: ${num(closedCount)} (Win≥TP1 ${num(winCount)} (Giveback ${num(givebackCount)}) | Direct SL ${num(directSlCount)})`,
     "",
     "📋 Open List (Top 15)"
   ];

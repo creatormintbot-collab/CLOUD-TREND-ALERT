@@ -27,7 +27,9 @@ function confluenceActive(obj = {}) {
 export function slCard(pos) {
   const pb = resolvePlaybook(pos);
   const conf = confluenceActive(pos);
-  if (pos.closeOutcome === "STOP_LOSS") {
+  const outcome = String(pos?.closeOutcome || "").toUpperCase();
+
+  if (outcome === "STOP_LOSS" || outcome.includes("BEFORE_TP1")) {
     return [
       "CLOUD TREND ALERT",
       "━━━━━━━━━━━━━━━━━━",
@@ -54,7 +56,7 @@ export function slCard(pos) {
     ].join("\n");
   }
 
-  if (pos.closeOutcome === "STOP_LOSS_AFTER_TP1") {
+  if (outcome === "STOP_LOSS_AFTER_TP1") {
     return [
       "CLOUD TREND ALERT",
       "━━━━━━━━━━━━━━━━━━",

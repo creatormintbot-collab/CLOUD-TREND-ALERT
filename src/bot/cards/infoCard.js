@@ -45,7 +45,7 @@ export function infoCard({
     "",
     "📌 Events (That Day)",
     `• Entry Hits: ${num(entryHits)}`,
-    `• Closed: ${closed} (Win≥TP1 ${num(winCount)} | Direct SL ${num(directSlCount)} | Giveback ${num(givebackCount)})`
+    `• Closed: ${closed} (Win≥TP1 ${num(winCount)} (Giveback ${num(givebackCount)}) | Direct SL ${num(directSlCount)})`
   ];
 
   if (closed > 0) {

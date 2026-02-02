@@ -10,6 +10,26 @@ function ensureTpHitMax(pos) {
   return 0;
 }
 
+function tfToMs(tf) {
+  const t = String(tf || "").trim().toLowerCase();
+  if (!t) return 0;
+  const m = t.match(/^(\d+)([mhd])$/);
+  if (!m) return 0;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  if (m[2] === "m") return n * 60 * 1000;
+  if (m[2] === "h") return n * 60 * 60 * 1000;
+  if (m[2] === "d") return n * 24 * 60 * 60 * 1000;
+  return 0;
+}
+
+function candleBucket(ms, tf) {
+  const t = Number(ms);
+  if (!Number.isFinite(t) || t <= 0) return null;
+  const step = tfToMs(tf);
+  if (!step) return null;
+  return Math.floor(t / step) * step;
+}
 
 function beOffsetSL(pos) {
   const entry = Number(pos?.levels?.entryMid);
@@ -27,6 +47,7 @@ export function applyTP(pos, price) {
   if (pos.status === "CLOSED") return { changed: false };
   if (pos.status === "PENDING_ENTRY" || pos.status === "EXPIRED") return { changed: false };
   const p = Number(price);
+  const nowMs = Date.now();
   // Backward-compatible: derive tpHitMax from legacy flags if missing.
   pos.tpHitMax = ensureTpHitMax(pos);
 
@@ -38,6 +59,7 @@ export function applyTP(pos, price) {
 
   if (!pos.hitTP1 && hit(tp1)) {
     pos.hitTP1 = true;
+    pos.tp1HitAt = nowMs;
     pos.tpHitMax = Math.max(ensureTpHitMax(pos), 1);
     pos.status = STATUS.RUNNING;
     // move SL to BE ± 0.10R (LOCKED)
@@ -48,6 +70,7 @@ export function applyTP(pos, price) {
 
   if (!pos.hitTP2 && hit(tp2)) {
     pos.hitTP2 = true;
+    pos.tp2HitAt = nowMs;
     pos.tpHitMax = Math.max(ensureTpHitMax(pos), 2);
     pos.status = STATUS.RUNNING;
     // suggested trailing SL left to discretion (we keep current)
@@ -57,6 +80,7 @@ export function applyTP(pos, price) {
 
   if (!pos.hitTP3 && hit(tp3)) {
     pos.hitTP3 = true;
+    pos.tp3HitAt = nowMs;
     pos.tpHitMax = 3;
     pos.status = STATUS.CLOSED;
     pos.closeOutcome = "PROFIT_FULL";
@@ -86,9 +110,38 @@ export function applySL(pos, price) {
   pos.slHit = true;
   pos.slHitAt = nowMs;
 
-  if (!pos.hitTP1) pos.closeOutcome = "STOP_LOSS_BEFORE_TP1";
-  else if (pos.hitTP1 && !pos.hitTP2) pos.closeOutcome = "STOP_LOSS_AFTER_TP1";
-  else pos.closeOutcome = "STOP_LOSS_AFTER_TP2";
+  const slBucket = candleBucket(nowMs, pos.tf);
+  const tp1Bucket = candleBucket(pos?.tp1HitAt, pos.tf);
+  const tp2Bucket = candleBucket(pos?.tp2HitAt, pos.tf);
+
+  const tp1Confirmed =
+    pos.hitTP1 &&
+    (tp1Bucket === null || slBucket === null || tp1Bucket < slBucket);
+  const tp2Confirmed =
+    pos.hitTP2 &&
+    (tp2Bucket === null || slBucket === null || tp2Bucket < slBucket);
+
+  // If TP hits occurred only within the same candle as SL, treat as unconfirmed (conservative).
+  if (!tp1Confirmed) {
+    pos.hitTP1 = false;
+    pos.tp1HitAt = null;
+  }
+  if (!tp2Confirmed) {
+    pos.hitTP2 = false;
+    pos.tp2HitAt = null;
+  }
+
+  pos.tpHitMax = tp2Confirmed ? 2 : (tp1Confirmed ? 1 : 0);
+
+  if (!tp1Confirmed) {
+    pos.closeOutcome = (tp1Bucket !== null && slBucket !== null && tp1Bucket === slBucket)
+      ? "STOP_LOSS_BEFORE_TP1_AMBIGUOUS"
+      : "STOP_LOSS_BEFORE_TP1";
+  } else if (!tp2Confirmed) {
+    pos.closeOutcome = "STOP_LOSS_AFTER_TP1";
+  } else {
+    pos.closeOutcome = "STOP_LOSS_AFTER_TP2";
+  }
 
   return { changed: true, event: "SL" };
 }

@@ -35,7 +35,7 @@ export function statusCard({
     `• Signals Created: ${num(created)} (AUTO ${num(autoSent)} | /scan ${num(scanSignalsSent)})`,
     `• /scan Requests (success): ${num(scanOk)}`,
     `• Entry Hits: ${num(entryHits)}`,
-    `• Closed: ${num(closedCount)} (Win≥TP1 ${num(winCount)} | Direct SL ${num(directSlCount)} | Giveback ${num(givebackCount)})`,
+    `• Closed: ${num(closedCount)} (Win≥TP1 ${num(winCount)} (Giveback ${num(givebackCount)}) | Direct SL ${num(directSlCount)})`,
     "",
     "📌 NOW (Snapshot)",
     `• Open (Filled): ${num(openFilled)} | Pending Entry: ${num(pendingEntry)} | Carried: ${num(carried)}`,
