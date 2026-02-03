@@ -10,6 +10,24 @@ function pctText(a, b) {
   return ((A / B) * 100).toFixed(1) + "%";
 }
 
+function collapseList(list = []) {
+  const rows = Array.isArray(list) ? list : [];
+  const counts = new Map();
+  const order = [];
+  for (const row of rows) {
+    if (!counts.has(row)) {
+      counts.set(row, 1);
+      order.push(row);
+    } else {
+      counts.set(row, counts.get(row) + 1);
+    }
+  }
+  return order.map((row) => {
+    const count = counts.get(row) || 1;
+    return count > 1 ? `${row} ×${count}` : row;
+  });
+}
+
 export function cohortActiveCard({
   timeKey,
   totalCreated = 0,
@@ -19,6 +37,7 @@ export function cohortActiveCard({
   tp1Hits = 0,
   tp2Hits = 0,
   tp3Hits = 0,
+  activeCount = 0,
   tradingClosed = 0,
   winCount = 0,
   directSlCount = 0,
@@ -50,12 +69,14 @@ export function cohortActiveCard({
     `• Trading Closed: ${num(tradingClosed)} (🏆 WIN TP1+: ${num(winCount)} | 🛑 LOSS Direct SL: ${num(directSlCount)})`,
     `• ⏳ Expired (No Entry): ${num(expiredCount)}`,
     `• Rates (Trading Only): Winrate ${winrateText} | Direct SL Rate ${slRateText}`,
+    `🧾 Cohort check: created=${num(created)} | active(open+pending)=${num(activeCount)} | closed=${num(tradingClosed)} | expired=${num(expiredCount)}`,
     "",
     "📋 Open List (Top 15)"
   ];
 
-  if (list.length) {
-    for (const row of list) lines.push(`• ${row}`);
+  const deduped = collapseList(list);
+  if (deduped.length) {
+    for (const row of deduped) lines.push(`• ${row}`);
   }
 
   if (moreCount > 0) {
@@ -117,8 +138,9 @@ export function cohortDetailCard({
     "📋 Open List (Top 15)"
   ];
 
-  if (list.length) {
-    for (const row of list) lines.push(`• ${row}`);
+  const deduped = collapseList(list);
+  if (deduped.length) {
+    for (const row of deduped) lines.push(`• ${row}`);
   }
 
   if (moreCount > 0) {

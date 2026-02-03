@@ -120,11 +120,17 @@ export function buildPositionStateMapFromEvents(events = []) {
 
     const hit = ev?.hit || {};
     const hitLevel = hit.tp3 ? 3 : (hit.tp2 ? 2 : (hit.tp1 ? 1 : 0));
-    if (hitLevel > 0) state.tpLevel = Math.max(state.tpLevel, hitLevel);
+    if (hitLevel > 0) {
+      state.tpLevel = Math.max(state.tpLevel, hitLevel);
+      state.hasEntry = true;
+    }
 
     const dayUTC = dayKeyFromEvent(ev);
     const tpLevel = tpLevelFromEvent(ev);
-    if (tpLevel > 0) state.tpLevel = Math.max(state.tpLevel, tpLevel);
+    if (tpLevel > 0) {
+      state.tpLevel = Math.max(state.tpLevel, tpLevel);
+      state.hasEntry = true;
+    }
 
     if (isEntryLifecycleEvent(ev)) state.hasEntry = true;
 
@@ -153,6 +159,10 @@ export function buildPositionStateMapFromEvents(events = []) {
 export function deriveOutcomeForState(state) {
   if (!state) {
     return { outcome: null, labelForList: "", countsTowardTradingClosed: false };
+  }
+  const terminal = Boolean(state.expiredNoEntry || state.closedBySL || state.closedByOther || state.closedDayUTC);
+  if (!state.hasEntry && terminal) {
+    return { outcome: "EXPIRED", labelForList: "⏳ EXPIRED (No Entry)", countsTowardTradingClosed: false };
   }
   if (state.expiredNoEntry) {
     return { outcome: "EXPIRED", labelForList: "⏳ EXPIRED (No Entry)", countsTowardTradingClosed: false };
@@ -219,7 +229,7 @@ export function buildStateFromPosition(pos) {
     symbol: pos?.symbol || "",
     positionId: pos?.id || "",
     tpLevel,
-    hasEntry: Boolean(pos?.entryHitAt || pos?.filledAt),
+    hasEntry: Boolean(pos?.entryHitAt || pos?.filledAt || tpLevel > 0),
     expiredNoEntry: expired,
     closedBySL: closed && sl,
     closedByOther: closed && !sl,

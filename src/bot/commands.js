@@ -7,7 +7,7 @@ import { infoCard } from "./cards/infoCard.js";
 import { buildOverlays } from "../charts/layout.js";
 import { renderEntryChart } from "../charts/renderer.js";
 import { createPositionFromSignal } from "../positions/positionModel.js";
-import { deriveOutcomeForState, summarizeOutcomesForDay, buildStateFromPosition } from "../positions/outcomes.js";
+import { buildPositionStateMapFromEvents, deriveOutcomeForState, summarizeOutcomesForDay, buildStateFromPosition } from "../positions/outcomes.js";
 import { inc as incGroupStat, readDay as readGroupStatsDay } from "../storage/groupStatsRepo.js";
 import { INTRADAY_COOLDOWN_MINUTES } from "../config/constants.js";
 
@@ -305,6 +305,21 @@ async function readSignalsRangeStats(signalsRepo, dateKeys = []) {
   }
 
   return totals;
+}
+
+async function readSignalsEventsRange(signalsRepo, dateKeys = []) {
+  try {
+    if (!signalsRepo || typeof signalsRepo.readDay !== "function") return [];
+    const keys = Array.isArray(dateKeys) ? dateKeys : [];
+    const events = [];
+    for (const key of keys) {
+      const day = await signalsRepo.readDay(key);
+      if (Array.isArray(day?.events)) events.push(...day.events);
+    }
+    return events;
+  } catch {
+    return [];
+  }
 }
 
 function normalizeGroupStats(stats) {
@@ -898,19 +913,62 @@ export class Commands {
 
       if (!args.length || String(args[0] || "").toLowerCase() === "active") {
         const all = await listAllPositions(this.positionsRepo);
-        const active = Array.isArray(this.positionsRepo.listActive?.()) ? this.positionsRepo.listActive() : all.filter(isActivePos);
-        const activeList = Array.isArray(active) ? active : [];
+        const cohortPositions = (Array.isArray(all) ? all : [])
+          .filter((p) => {
+            const createdAt = Number(p?.createdAt || 0);
+            if (!Number.isFinite(createdAt) || createdAt <= 0) return false;
+            const createdKey = utcDateKeyFromMs(createdAt);
+            return range.keys.includes(createdKey);
+          });
 
-        const canUseSignals = this.signalsRepo && typeof this.signalsRepo.readDay === "function";
-        const createdStats = canUseSignals
-          ? await readSignalsRangeStats(this.signalsRepo, range.keys)
-          : createdRangeFromPositions(all, range.keys);
-        const lifecycleStats = canUseSignals
-          ? await readLifecycleRangeStats(this.signalsRepo, range.keys)
-          : lifecycleRangeFromPositions(all, range.keys);
+        const cohortIds = new Set(cohortPositions.map((p) => p?.id).filter(Boolean));
+        const events = await readSignalsEventsRange(this.signalsRepo, range.keys);
+        const cohortEvents = events.filter((ev) => cohortIds.has(ev?.positionId));
 
+        const createdStats = createdRangeFromPositions(cohortPositions, range.keys);
         const totalCreated = Number(createdStats.totalCreated ?? (createdStats.autoSent + createdStats.scanSignalsSent) ?? 0);
-        const rows = activeList
+
+        const progress = { entryHits: 0, tp1Hits: 0, tp2Hits: 0, tp3Hits: 0 };
+        for (const ev of cohortEvents) {
+          if (!ev) continue;
+          const type = String(ev.type || "").toUpperCase();
+          const evt = String(ev.event || "").toUpperCase();
+          const typeOk = !type || type === "LIFECYCLE" || type === "TP";
+          if (!typeOk) continue;
+          if (evt === "FILLED") progress.entryHits += 1;
+          if (evt === "TP1") progress.tp1Hits += 1;
+          if (evt === "TP2") progress.tp2Hits += 1;
+          if (evt === "TP3") progress.tp3Hits += 1;
+        }
+
+        if (!cohortEvents.length) {
+          progress.entryHits = cohortPositions.filter((p) => entryHitTs(p) > 0).length;
+          progress.tp1Hits = cohortPositions.filter((p) => tpHitTs(p, 1) > 0).length;
+          progress.tp2Hits = cohortPositions.filter((p) => tpHitTs(p, 2) > 0).length;
+          progress.tp3Hits = cohortPositions.filter((p) => tpHitTs(p, 3) > 0).length;
+        }
+
+        const stateById = buildPositionStateMapFromEvents(cohortEvents);
+        let winCount = 0;
+        let directSlCount = 0;
+        let expiredCount = 0;
+
+        for (const p of cohortPositions) {
+          const state = stateById[p.id] || buildStateFromPosition(p);
+          const derived = deriveOutcomeForState(state);
+          if (derived.outcome === "WIN") winCount += 1;
+          else if (derived.outcome === "LOSS") directSlCount += 1;
+          else if (derived.outcome === "EXPIRED") expiredCount += 1;
+        }
+
+        const tradingClosed = winCount + directSlCount;
+
+        const openList = cohortPositions.filter((p) => isActivePos(p));
+        const openFilled = openList.filter((p) => entryHitTs(p) > 0).length;
+        const pendingEntry = openList.filter((p) => entryHitTs(p) === 0).length;
+        const activeCount = openFilled + pendingEntry;
+
+        const rows = openList
           .slice()
           .sort((a, b) => Number(b?.createdAt || 0) - Number(a?.createdAt || 0))
           .map((p) => {
@@ -929,14 +987,15 @@ export class Commands {
             totalCreated,
             autoSent: createdStats.autoSent,
             scanSignalsSent: createdStats.scanSignalsSent,
-            entryHits: lifecycleStats.entryHits,
-            tp1Hits: lifecycleStats.tp1Hits,
-            tp2Hits: lifecycleStats.tp2Hits,
-            tp3Hits: lifecycleStats.tp3Hits,
-            tradingClosed: lifecycleStats.tradingClosed,
-            winCount: lifecycleStats.winCount,
-            directSlCount: lifecycleStats.directSlCount,
-            expiredCount: lifecycleStats.expiredCount,
+            entryHits: progress.entryHits,
+            tp1Hits: progress.tp1Hits,
+            tp2Hits: progress.tp2Hits,
+            tp3Hits: progress.tp3Hits,
+            activeCount,
+            tradingClosed,
+            winCount,
+            directSlCount,
+            expiredCount,
             list,
             moreCount
           })
@@ -961,27 +1020,33 @@ export class Commands {
       const cohort = (Array.isArray(all) ? all : [])
         .filter((p) => sameUtcDay(Number(p?.createdAt || 0), dateArg));
 
+      const cohortIds = new Set(cohort.map((p) => p?.id).filter(Boolean));
+      const events = await readSignalsEventsRange(this.signalsRepo, range.keys);
+      const cohortEvents = events.filter((ev) => cohortIds.has(ev?.positionId));
+      const stateById = buildPositionStateMapFromEvents(cohortEvents);
+
       const openList = cohort.filter((p) => isActivePos(p));
       const openCount = openList.filter((p) => entryHitTs(p) > 0).length;
       const pendingCount = openList.filter((p) => entryHitTs(p) === 0).length;
       const closedList = cohort.filter(isClosedPos);
-      const closedCount = closedList.length;
       const totalCreated = cohort.length;
-      const expiredCount = cohort.filter((p) => isExpiredPos(p)).length;
       const entryHits = cohort.filter((p) => entryHitTs(p) > 0).length;
       const tp1Hits = cohort.filter((p) => tpHitTs(p, 1) > 0).length;
       const tp2Hits = cohort.filter((p) => tpHitTs(p, 2) > 0).length;
       const tp3Hits = cohort.filter((p) => tpHitTs(p, 3) > 0).length;
 
-      const tradingClosedList = closedList.filter((p) => !isExpiredPos(p));
       let winCount = 0;
       let directSlCount = 0;
-      for (const p of tradingClosedList) {
-        const derived = deriveOutcomeForState(buildStateFromPosition(p));
+      let expiredCount = 0;
+      for (const p of cohort) {
+        const state = stateById[p.id] || buildStateFromPosition(p);
+        const derived = deriveOutcomeForState(state);
         if (derived.outcome === "WIN") winCount += 1;
         else if (derived.outcome === "LOSS") directSlCount += 1;
+        else if (derived.outcome === "EXPIRED") expiredCount += 1;
       }
       const tradingClosed = winCount + directSlCount;
+      const closedCount = tradingClosed;
 
       const createdStats = await resolveCreatedStats({
         dateKey: dateArg,
