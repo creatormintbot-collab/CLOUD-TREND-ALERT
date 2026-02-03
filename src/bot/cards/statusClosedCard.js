@@ -3,25 +3,25 @@ function num(x) {
   return Number.isFinite(n) ? n : 0;
 }
 
-function pct(a, b) {
+function pctText(a, b) {
   const A = Number(a);
   const B = Number(b);
-  if (!Number.isFinite(A) || !Number.isFinite(B) || B <= 0) return "0.0";
-  return ((A / B) * 100).toFixed(1);
+  if (!Number.isFinite(A) || !Number.isFinite(B) || B <= 0) return "N/A";
+  return ((A / B) * 100).toFixed(1) + "%";
 }
 
 export function statusClosedCard({
   dateKey,
-  closedCount = 0,
+  tradingClosed = 0,
   winCount = 0,
   directSlCount = 0,
-  givebackCount = 0,
+  expiredCount = 0,
   list = [],
   moreCount = 0
 } = {}) {
-  const closed = num(closedCount);
-  const winrate = pct(winCount, closed);
-  const slRate = pct(directSlCount, closed);
+  const closed = num(tradingClosed);
+  const winrateText = pctText(winCount, closed);
+  const slRateText = pctText(directSlCount, closed);
 
   const lines = [
     "CLOUD TREND ALERT",
@@ -29,13 +29,10 @@ export function statusClosedCard({
     "🎯 CLOSED TODAY (UTC)",
     `📅 Date: ${dateKey}`,
     "",
-    `✅ Closed: ${closed}`,
-    `• Win≥TP1: ${num(winCount)} | Direct SL: ${num(directSlCount)} | Giveback: ${num(givebackCount)}`
+    `✅ Trading Closed: ${closed} (🏆 WIN: ${num(winCount)} | 🛑 LOSS: ${num(directSlCount)})`,
+    `⏳ Expired (No Entry): ${num(expiredCount)}`,
+    `📊 Rates (Trading Only): Winrate ${winrateText} | Direct SL Rate ${slRateText}`
   ];
-
-  if (closed > 0) {
-    lines.push(`• Rates: Winrate ${winrate}% | Direct SL Rate ${slRate}%`);
-  }
 
   lines.push("", "🧾 List (Top 15)");
 

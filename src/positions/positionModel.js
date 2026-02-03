@@ -35,6 +35,9 @@ export function createPositionFromSignal(
     tpHitMax: 0,
     slHit: false,
     slHitAt: null,
+    tp1HitAt: null,
+    tp2HitAt: null,
+    tp3HitAt: null,
 
 
     score: signal.score,

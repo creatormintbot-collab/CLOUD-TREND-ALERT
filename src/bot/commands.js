@@ -217,6 +217,119 @@ async function readSignalsDayStats(signalsRepo, dayKey) {
   }
 }
 
+function emptyLifecycleStats() {
+  return {
+    entryHits: 0,
+    tp1Hits: 0,
+    tp2Hits: 0,
+    tp3Hits: 0,
+    winCount: 0,
+    directSlCount: 0,
+    expiredCount: 0,
+    tradingClosed: 0
+  };
+}
+
+function isWinLifecycle(ev) {
+  if (!ev || typeof ev !== "object") return false;
+  const hit = ev.hit || {};
+  if (hit.tp1 || hit.tp2 || hit.tp3) return true;
+  const outcome = String(ev.closeOutcome || "").toUpperCase();
+  if (!outcome) return false;
+  if (outcome.includes("PROFIT")) return true;
+  if (outcome.includes("TP1") || outcome.includes("TP2") || outcome.includes("TP3")) return true;
+  if (outcome.includes("AFTER_TP")) return true;
+  return false;
+}
+
+async function readLifecycleDayStats(signalsRepo, dayKey) {
+  try {
+    if (!signalsRepo || typeof signalsRepo.readDay !== "function") return null;
+    const dk = String(dayKey || utcDateKeyNow());
+    const data = await signalsRepo.readDay(dk);
+    const events = Array.isArray(data?.events) ? data.events : [];
+    const stats = emptyLifecycleStats();
+
+    for (const ev of events) {
+      if (!ev || String(ev.type || "").toUpperCase() !== "LIFECYCLE") continue;
+      const evt = String(ev.event || "").toUpperCase();
+
+      if (evt === "FILLED") {
+        stats.entryHits += 1;
+        continue;
+      }
+      if (evt === "TP1") {
+        stats.tp1Hits += 1;
+        continue;
+      }
+      if (evt === "TP2") {
+        stats.tp2Hits += 1;
+        continue;
+      }
+      if (evt === "TP3") {
+        stats.tp3Hits += 1;
+        stats.winCount += 1;
+        stats.tradingClosed += 1;
+        continue;
+      }
+      if (evt === "SL") {
+        if (isWinLifecycle(ev)) stats.winCount += 1;
+        else stats.directSlCount += 1;
+        stats.tradingClosed += 1;
+        continue;
+      }
+      if (evt === "EXPIRED") {
+        stats.expiredCount += 1;
+      }
+    }
+
+    return stats;
+  } catch {
+    return null;
+  }
+}
+
+async function readLifecycleRangeStats(signalsRepo, dateKeys = []) {
+  const keys = Array.isArray(dateKeys) ? dateKeys : [];
+  const totals = emptyLifecycleStats();
+
+  for (const key of keys) {
+    const day = await readLifecycleDayStats(signalsRepo, key);
+    if (!day) continue;
+    totals.entryHits += day.entryHits;
+    totals.tp1Hits += day.tp1Hits;
+    totals.tp2Hits += day.tp2Hits;
+    totals.tp3Hits += day.tp3Hits;
+    totals.winCount += day.winCount;
+    totals.directSlCount += day.directSlCount;
+    totals.expiredCount += day.expiredCount;
+    totals.tradingClosed += day.tradingClosed;
+  }
+
+  return totals;
+}
+
+async function readSignalsRangeStats(signalsRepo, dateKeys = []) {
+  const keys = Array.isArray(dateKeys) ? dateKeys : [];
+  const totals = {
+    autoSent: 0,
+    scanSignalsSent: 0,
+    scanOk: 0,
+    totalCreated: 0
+  };
+
+  for (const key of keys) {
+    const day = await readSignalsDayStats(signalsRepo, key);
+    if (!day) continue;
+    totals.autoSent += Number(day.autoSignalsSent || 0);
+    totals.scanSignalsSent += Number(day.scanSignalsSent || 0);
+    totals.scanOk += Number(day.scanRequestsSuccess || 0);
+    totals.totalCreated += Number(day.totalSignalsCreated || (day.autoSignalsSent + day.scanSignalsSent) || 0);
+  }
+
+  return totals;
+}
+
 function normalizeGroupStats(stats) {
   const s = stats && typeof stats === "object" ? stats : {};
   const toNum = (value) => {
@@ -284,6 +397,31 @@ function entryHitTs(p) {
   return a || b || c || d || 0;
 }
 
+function tpHitTs(p, level = 1) {
+  const key = level === 3 ? "tp3HitAt" : (level === 2 ? "tp2HitAt" : "tp1HitAt");
+  const v = Number(p?.[key] || p?.[`${key}Utc`] || 0);
+  return Number.isFinite(v) ? v : 0;
+}
+
+function expiredAtTs(p) {
+  const a = Number(p?.expiredAt || 0);
+  const b = Number(p?.expiredAtUtc || 0);
+  const c = Number(p?.closedAt || 0);
+  return a || b || c || 0;
+}
+
+function closedAtTs(p) {
+  const a = Number(p?.closedAt || 0);
+  const b = Number(p?.closedAtUtc || 0);
+  const c = Number(p?.expiredAt || 0);
+  return a || b || c || 0;
+}
+
+function isExpiredPos(p) {
+  const s = String(p?.status || "").toUpperCase();
+  return s === "EXPIRED";
+}
+
 function slHit(p) {
   return Boolean(
     p?.hitSL ||
@@ -335,21 +473,92 @@ function ageDaysFromMs(createdAtMs, nowKey) {
   return Math.max(0, Math.floor((nowStart - createdStart) / DAY_MS));
 }
 
+function formatCreatedMmDd(createdAtMs) {
+  const ts = Number(createdAtMs);
+  if (!Number.isFinite(ts) || ts <= 0) return "N/A";
+  return new Date(ts).toISOString().slice(5, 10);
+}
+
+function progressFromPositions(list, dateKey) {
+  const rows = Array.isArray(list) ? list : [];
+  return {
+    entryHits: rows.filter((p) => entryHitTs(p) > 0 && sameUtcDay(entryHitTs(p), dateKey)).length,
+    tp1Hits: rows.filter((p) => tpHitTs(p, 1) > 0 && sameUtcDay(tpHitTs(p, 1), dateKey)).length,
+    tp2Hits: rows.filter((p) => tpHitTs(p, 2) > 0 && sameUtcDay(tpHitTs(p, 2), dateKey)).length,
+    tp3Hits: rows.filter((p) => tpHitTs(p, 3) > 0 && sameUtcDay(tpHitTs(p, 3), dateKey)).length
+  };
+}
+
+function outcomesFromPositions(list, dateKey) {
+  const rows = Array.isArray(list) ? list : [];
+  const expiredCount = rows.filter((p) => isExpiredPos(p) && sameUtcDay(expiredAtTs(p), dateKey)).length;
+  const tradingClosedList = rows
+    .filter((p) => !isExpiredPos(p) && isClosedPos(p))
+    .filter((p) => sameUtcDay(closedAtTs(p), dateKey));
+
+  const winCount = tradingClosedList.filter((p) => tpHitMax(p) >= 1).length;
+  const tradingClosed = tradingClosedList.length;
+  const directSlCount = Math.max(0, tradingClosed - winCount);
+
+  return { tradingClosed, winCount, directSlCount, expiredCount };
+}
+
+function lifecycleRangeFromPositions(list, dateKeys = []) {
+  const keys = Array.isArray(dateKeys) ? dateKeys : [];
+  const totals = emptyLifecycleStats();
+  for (const key of keys) {
+    const prog = progressFromPositions(list, key);
+    const out = outcomesFromPositions(list, key);
+    totals.entryHits += prog.entryHits;
+    totals.tp1Hits += prog.tp1Hits;
+    totals.tp2Hits += prog.tp2Hits;
+    totals.tp3Hits += prog.tp3Hits;
+    totals.winCount += out.winCount;
+    totals.directSlCount += out.directSlCount;
+    totals.expiredCount += out.expiredCount;
+    totals.tradingClosed += out.tradingClosed;
+  }
+  return totals;
+}
+
+function createdRangeFromPositions(list, dateKeys = []) {
+  const keys = new Set(Array.isArray(dateKeys) ? dateKeys : []);
+  let autoSent = 0;
+  let scanSignalsSent = 0;
+  let totalCreated = 0;
+  const rows = Array.isArray(list) ? list : [];
+
+  for (const p of rows) {
+    const createdAt = Number(p?.createdAt || 0);
+    if (!Number.isFinite(createdAt) || createdAt <= 0) continue;
+    const key = utcDateKeyFromMs(createdAt);
+    if (!keys.has(key)) continue;
+    totalCreated += 1;
+    const src = String(p?.source || "").toUpperCase();
+    if (src === "AUTO") autoSent += 1;
+    else if (src === "SCAN") scanSignalsSent += 1;
+  }
+
+  return { autoSent, scanSignalsSent, totalCreated };
+}
+
 function openStatusLabel(p) {
-  return entryHitTs(p) > 0 ? "RUNNING" : "PENDING_ENTRY";
+  const t = tpHitMax(p);
+  if (t >= 3) return "🥉 TP3";
+  if (t === 2) return "🥈 TP2";
+  if (t === 1) return "🥇 TP1";
+  if (entryHitTs(p) > 0) return "🎯 ENTRY";
+  return "🕒 PENDING";
 }
 
 function outcomeLabel(p) {
+  const status = String(p?.status || "").toUpperCase();
+  if (status === "EXPIRED") return "EXPIRED (No Entry)";
   const t = tpHitMax(p);
   const sl = slHit(p);
-  if (sl && t >= 1) return "GIVEBACK";
-  if (t >= 3) return "TP3";
-  if (t === 2) return "TP2";
-  if (t === 1) return "TP1";
-  if (sl) return "SL (direct)";
-  const status = String(p?.status || "").toUpperCase();
-  if (status === "EXPIRED") return "EXPIRED";
-  return "CLOSED";
+  if (sl && t >= 1) return "🟡 PARTIAL (SL After TP)";
+  if (t >= 1) return "WIN (TP1+)";
+  return "LOSS (Direct SL)";
 }
 
 function inferPlaybookFromPos(p, secondaryTf) {
@@ -564,16 +773,19 @@ export class Commands {
       const intradayCount = activeList.filter((p) => inferPlaybookFromPos(p, secondaryTf) === "INTRADAY").length;
       const swingCount = activeList.filter((p) => inferPlaybookFromPos(p, secondaryTf) === "SWING").length;
 
-      const entryHits = (Array.isArray(all) ? all : [])
-        .filter((p) => entryHitTs(p) > 0 && sameUtcDay(entryHitTs(p), dateKey))
-        .length;
+      const lifecycle = await readLifecycleDayStats(this.signalsRepo, dateKey);
+      const progressStats = lifecycle || progressFromPositions(all, dateKey);
+      const outcomeStats = lifecycle || outcomesFromPositions(all, dateKey);
 
-      const closedTodayList = (Array.isArray(all) ? all : [])
-        .filter(isClosedPos)
-        .filter((p) => sameUtcDay(Number(p?.closedAt || 0), dateKey));
+      const entryHits = Number(progressStats.entryHits || 0);
+      const tp1Hits = Number(progressStats.tp1Hits || 0);
+      const tp2Hits = Number(progressStats.tp2Hits || 0);
+      const tp3Hits = Number(progressStats.tp3Hits || 0);
 
-      const closedCounts = summarizeClosed(closedTodayList);
-      const winCount = closedCounts.tp1 + closedCounts.tp2 + closedCounts.tp3;
+      const tradingClosed = Number(outcomeStats.tradingClosed || 0);
+      const winCount = Number(outcomeStats.winCount || 0);
+      const directSlCount = Number(outcomeStats.directSlCount || 0);
+      const expiredCount = Number(outcomeStats.expiredCount || 0);
 
       await this.sender.sendText(
         chatId,
@@ -585,10 +797,13 @@ export class Commands {
           scanOk,
           totalCreated,
           entryHits,
-          closedCount: closedTodayList.length,
+          tp1Hits,
+          tp2Hits,
+          tp3Hits,
+          tradingClosed,
           winCount,
-          directSlCount: closedCounts.directSl,
-          givebackCount: closedCounts.giveback,
+          directSlCount,
+          expiredCount,
           openFilled,
           pendingEntry,
           carried,
@@ -616,7 +831,8 @@ export class Commands {
         .sort((a, b) => Number(b?.createdAt || 0) - Number(a?.createdAt || 0))
         .map((p) => {
           const age = ageDaysFromMs(Number(p?.createdAt || 0), dateKey);
-          return `${formatPosBase(p)} — ${openStatusLabel(p)} — age ${age}d`;
+          const created = formatCreatedMmDd(Number(p?.createdAt || 0));
+          return `${formatPosBase(p)} — ${openStatusLabel(p)} — age ${age}d — created ${created}`;
         });
 
       const list = rows.slice(0, 15);
@@ -641,14 +857,17 @@ export class Commands {
 
       const all = await listAllPositions(this.positionsRepo);
       const closedTodayList = (Array.isArray(all) ? all : [])
-        .filter(isClosedPos)
-        .filter((p) => sameUtcDay(Number(p?.closedAt || 0), dateKey));
+        .filter((p) => closedAtTs(p) > 0)
+        .filter((p) => sameUtcDay(closedAtTs(p), dateKey));
 
-      const closedCounts = summarizeClosed(closedTodayList);
-      const winCount = closedCounts.tp1 + closedCounts.tp2 + closedCounts.tp3;
+      const tradingClosedList = closedTodayList.filter((p) => !isExpiredPos(p));
+      const tradingClosed = tradingClosedList.length;
+      const winCount = tradingClosedList.filter((p) => tpHitMax(p) >= 1).length;
+      const directSlCount = Math.max(0, tradingClosed - winCount);
+      const expiredCount = closedTodayList.filter((p) => isExpiredPos(p)).length;
       const rows = closedTodayList
         .slice()
-        .sort((a, b) => Number(b?.closedAt || 0) - Number(a?.closedAt || 0))
+        .sort((a, b) => Number(closedAtTs(b) || 0) - Number(closedAtTs(a) || 0))
         .map((p) => `${formatPosBase(p)} — ${outcomeLabel(p)}`);
 
       const list = rows.slice(0, 15);
@@ -658,10 +877,10 @@ export class Commands {
         msg.chat.id,
         statusClosedCard({
           dateKey,
-          closedCount: closedTodayList.length,
+          tradingClosed,
           winCount,
-          directSlCount: closedCounts.directSl,
-          givebackCount: closedCounts.giveback,
+          directSlCount,
+          expiredCount,
           list,
           moreCount
         })
@@ -683,24 +902,46 @@ export class Commands {
         const active = Array.isArray(this.positionsRepo.listActive?.()) ? this.positionsRepo.listActive() : all.filter(isActivePos);
         const activeList = Array.isArray(active) ? active : [];
 
-        const byDate = Object.fromEntries(range.keys.map((k) => [k, { open: 0, pending: 0 }]));
+        const canUseSignals = this.signalsRepo && typeof this.signalsRepo.readDay === "function";
+        const createdStats = canUseSignals
+          ? await readSignalsRangeStats(this.signalsRepo, range.keys)
+          : createdRangeFromPositions(all, range.keys);
+        const lifecycleStats = canUseSignals
+          ? await readLifecycleRangeStats(this.signalsRepo, range.keys)
+          : lifecycleRangeFromPositions(all, range.keys);
 
-        for (const p of activeList) {
-          const createdAt = Number(p?.createdAt || 0);
-          if (!Number.isFinite(createdAt) || createdAt <= 0) continue;
-          const createdKey = utcDateKeyFromMs(createdAt);
-          if (!byDate[createdKey]) continue;
-          if (entryHitTs(p) > 0) byDate[createdKey].open += 1;
-          else byDate[createdKey].pending += 1;
-        }
+        const totalCreated = Number(createdStats.totalCreated ?? (createdStats.autoSent + createdStats.scanSignalsSent) ?? 0);
+        const rows = activeList
+          .slice()
+          .sort((a, b) => Number(b?.createdAt || 0) - Number(a?.createdAt || 0))
+          .map((p) => {
+            const age = ageDaysFromMs(Number(p?.createdAt || 0), todayKey);
+            const created = formatCreatedMmDd(Number(p?.createdAt || 0));
+            return `${formatPosBase(p)} — ${openStatusLabel(p)} — age ${age}d — created ${created}`;
+          });
 
-        const rows = range.keys.map((k) => ({
-          dateKey: k,
-          open: byDate[k].open,
-          pending: byDate[k].pending
-        }));
+        const list = rows.slice(0, 15);
+        const moreCount = Math.max(0, rows.length - list.length);
 
-        await this.sender.sendText(msg.chat.id, cohortActiveCard({ timeKey, rows }));
+        await this.sender.sendText(
+          msg.chat.id,
+          cohortActiveCard({
+            timeKey,
+            totalCreated,
+            autoSent: createdStats.autoSent,
+            scanSignalsSent: createdStats.scanSignalsSent,
+            entryHits: lifecycleStats.entryHits,
+            tp1Hits: lifecycleStats.tp1Hits,
+            tp2Hits: lifecycleStats.tp2Hits,
+            tp3Hits: lifecycleStats.tp3Hits,
+            tradingClosed: lifecycleStats.tradingClosed,
+            winCount: lifecycleStats.winCount,
+            directSlCount: lifecycleStats.directSlCount,
+            expiredCount: lifecycleStats.expiredCount,
+            list,
+            moreCount
+          })
+        );
         return;
       }
 
@@ -727,11 +968,16 @@ export class Commands {
       const closedList = cohort.filter(isClosedPos);
       const closedCount = closedList.length;
       const totalCreated = cohort.length;
-      const expiredCount = cohort.filter((p) => String(p?.status || "").toUpperCase() === "EXPIRED").length;
+      const expiredCount = cohort.filter((p) => isExpiredPos(p)).length;
       const entryHits = cohort.filter((p) => entryHitTs(p) > 0).length;
+      const tp1Hits = cohort.filter((p) => tpHitTs(p, 1) > 0).length;
+      const tp2Hits = cohort.filter((p) => tpHitTs(p, 2) > 0).length;
+      const tp3Hits = cohort.filter((p) => tpHitTs(p, 3) > 0).length;
 
-      const closedCounts = summarizeClosed(closedList);
-      const winCount = closedCounts.tp1 + closedCounts.tp2 + closedCounts.tp3;
+      const tradingClosedList = closedList.filter((p) => !isExpiredPos(p));
+      const tradingClosed = tradingClosedList.length;
+      const winCount = tradingClosedList.filter((p) => tpHitMax(p) >= 1).length;
+      const directSlCount = Math.max(0, tradingClosed - winCount);
 
       const createdStats = await resolveCreatedStats({
         dateKey: dateArg,
@@ -745,7 +991,7 @@ export class Commands {
       if (listMode === "closed") {
         rows = closedList
           .slice()
-          .sort((a, b) => Number(b?.closedAt || 0) - Number(a?.closedAt || 0))
+          .sort((a, b) => Number(closedAtTs(b) || 0) - Number(closedAtTs(a) || 0))
           .map((p) => {
             const age = ageDaysFromMs(Number(p?.createdAt || 0), todayKey);
             return `${formatPosBase(p)} — ${outcomeLabel(p)} — age ${age}d`;
@@ -754,21 +1000,24 @@ export class Commands {
         const recent = cohort
           .filter((p) =>
             sameUtcDay(entryHitTs(p), todayKey) ||
-            sameUtcDay(Number(p?.closedAt || 0), todayKey)
+            sameUtcDay(closedAtTs(p), todayKey)
           );
 
         rows = recent
           .slice()
           .sort((a, b) => {
-            const aRecent = Math.max(Number(a?.closedAt || 0), Number(entryHitTs(a) || 0));
-            const bRecent = Math.max(Number(b?.closedAt || 0), Number(entryHitTs(b) || 0));
+            const aRecent = Math.max(Number(closedAtTs(a) || 0), Number(entryHitTs(a) || 0));
+            const bRecent = Math.max(Number(closedAtTs(b) || 0), Number(entryHitTs(b) || 0));
             return bRecent - aRecent;
           })
           .map((p) => {
             const age = ageDaysFromMs(Number(p?.createdAt || 0), todayKey);
             if (isClosedPos(p)) return `${formatPosBase(p)} — ${outcomeLabel(p)} — age ${age}d`;
-            if (isActivePos(p)) return `${formatPosBase(p)} — ${openStatusLabel(p)} — age ${age}d`;
-            return `${formatPosBase(p)} — EXPIRED — age ${age}d`;
+            if (isActivePos(p)) {
+              const created = formatCreatedMmDd(Number(p?.createdAt || 0));
+              return `${formatPosBase(p)} — ${openStatusLabel(p)} — age ${age}d — created ${created}`;
+            }
+            return `${formatPosBase(p)} — EXPIRED (No Entry) — age ${age}d`;
           });
       } else {
         rows = openList
@@ -776,7 +1025,8 @@ export class Commands {
           .sort((a, b) => Number(b?.createdAt || 0) - Number(a?.createdAt || 0))
           .map((p) => {
             const age = ageDaysFromMs(Number(p?.createdAt || 0), todayKey);
-            return `${formatPosBase(p)} — ${openStatusLabel(p)} — age ${age}d`;
+            const created = formatCreatedMmDd(Number(p?.createdAt || 0));
+            return `${formatPosBase(p)} — ${openStatusLabel(p)} — age ${age}d — created ${created}`;
           });
       }
 
@@ -798,9 +1048,12 @@ export class Commands {
           closedCount,
           expiredCount,
           entryHits,
+          tp1Hits,
+          tp2Hits,
+          tp3Hits,
+          tradingClosed,
           winCount,
-          directSlCount: closedCounts.directSl,
-          givebackCount: closedCounts.giveback,
+          directSlCount,
           list,
           moreCount
         })
@@ -850,16 +1103,19 @@ export class Commands {
       });
 
       const all = await listAllPositions(this.positionsRepo);
-      const entryHits = (Array.isArray(all) ? all : [])
-        .filter((p) => entryHitTs(p) > 0 && sameUtcDay(entryHitTs(p), dateKey))
-        .length;
+      const lifecycle = await readLifecycleDayStats(this.signalsRepo, dateKey);
+      const progressStats = lifecycle || progressFromPositions(all, dateKey);
+      const outcomeStats = lifecycle || outcomesFromPositions(all, dateKey);
 
-      const closedList = (Array.isArray(all) ? all : [])
-        .filter(isClosedPos)
-        .filter((p) => sameUtcDay(Number(p?.closedAt || 0), dateKey));
+      const entryHits = Number(progressStats.entryHits || 0);
+      const tp1Hits = Number(progressStats.tp1Hits || 0);
+      const tp2Hits = Number(progressStats.tp2Hits || 0);
+      const tp3Hits = Number(progressStats.tp3Hits || 0);
 
-      const closedCounts = summarizeClosed(closedList);
-      const winCount = closedCounts.tp1 + closedCounts.tp2 + closedCounts.tp3;
+      const tradingClosed = Number(outcomeStats.tradingClosed || 0);
+      const winCount = Number(outcomeStats.winCount || 0);
+      const directSlCount = Number(outcomeStats.directSlCount || 0);
+      const expiredCount = Number(outcomeStats.expiredCount || 0);
       const macroCounts = macroCountsFromDay(createdStats.day);
 
       await this.sender.sendText(
@@ -871,10 +1127,13 @@ export class Commands {
           scanSignalsSent,
           scanOk,
           entryHits,
-          closedCount: closedList.length,
+          tp1Hits,
+          tp2Hits,
+          tp3Hits,
+          tradingClosed,
           winCount,
-          directSlCount: closedCounts.directSl,
-          givebackCount: closedCounts.giveback,
+          directSlCount,
+          expiredCount,
           bullCount: macroCounts.bull,
           bearCount: macroCounts.bear,
           neutralCount: macroCounts.neutral
