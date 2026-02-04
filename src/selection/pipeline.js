@@ -22,6 +22,7 @@ export class Pipeline {
     this.stateRepo = stateRepo;
     this.rotationRepo = rotationRepo;
     this.env = env;
+    this.lastAutoStats = null;
   }
 
   _scanTimeframes() {
@@ -387,6 +388,19 @@ async _maybeWarmupKlines(symbols, tfs, reason = "scan", opts = {}) {
     const symbols = (this.universe.symbolsForAuto?.() || this.universe.symbols?.() || []);
     const tfs = this._autoTimeframes();
 
+    const stats = {
+      symbols: symbols.length,
+      tfs: tfs.length,
+      topUnion: 0,
+      pairTfCooldownBlocked: 0,
+      evaluated: 0,
+      evalOk: 0,
+      scoreTooLow: 0,
+      macdFail: 0,
+      secondaryScoreFail: 0,
+      candidates: 0
+    };
+
     const topUnion = new Map();
     const rankCache = [];
 
@@ -405,10 +419,16 @@ async _maybeWarmupKlines(symbols, tfs, reason = "scan", opts = {}) {
       }
     }
 
+    stats.topUnion = topUnion.size;
+
     const candidates = [];
     for (const row of topUnion.values()) {
       // Skip recently-sent pair+tf (rolling window)
-      if (!this.stateRepo.canSendSymbol(`${row.symbol}|${row.tf}`, pairTfCooldownMin)) continue;
+      if (!this.stateRepo.canSendSymbol(`${row.symbol}|${row.tf}`, pairTfCooldownMin)) {
+        stats.pairTfCooldownBlocked += 1;
+        continue;
+      }
+      stats.evaluated += 1;
       const r = evaluateSignal({
         symbol: row.symbol,
         tf: row.tf,
@@ -418,19 +438,30 @@ async _maybeWarmupKlines(symbols, tfs, reason = "scan", opts = {}) {
         isAuto: true
       });
       if (!r?.ok) continue;
+      stats.evalOk += 1;
 
       // AUTO filters (LOCKED)
-      if (r.score < this.env.AUTO_MIN_SCORE) continue;
+      if (r.score < this.env.AUTO_MIN_SCORE) {
+        stats.scoreTooLow += 1;
+        continue;
+      }
 
       // MACD gate must pass for AUTO
       const closes = r.candles.map((c) => Number(c.close));
       const m = macd(closes, 12, 26, 9);
-      if (!macdGate({ direction: r.direction, hist: m.hist })) continue;
+      if (!macdGate({ direction: r.direction, hist: m.hist })) {
+        stats.macdFail += 1;
+        continue;
+      }
 
       // 4h publish rule (LOCKED)
-      if (r.tf === this.env.SECONDARY_TIMEFRAME && String(r.symbol).toUpperCase() !== "ETHUSDT" && r.score < this.env.SECONDARY_MIN_SCORE) continue;
+      if (r.tf === this.env.SECONDARY_TIMEFRAME && String(r.symbol).toUpperCase() !== "ETHUSDT" && r.score < this.env.SECONDARY_MIN_SCORE) {
+        stats.secondaryScoreFail += 1;
+        continue;
+      }
 
       candidates.push(r);
+      stats.candidates += 1;
       rankCache.push({ symbol: r.symbol, tf: r.tf, score: r.score });
     }
 
@@ -439,6 +470,7 @@ async _maybeWarmupKlines(symbols, tfs, reason = "scan", opts = {}) {
     await this.stateRepo.flush();
 
     candidates.sort((a, b) => b.score - a.score);
+    this.lastAutoStats = { ...stats };
     return candidates;
   }
 }

@@ -299,6 +299,24 @@ export class SignalsRepo {
     return stats;
   }
 
+  // Count ENTRY events by source for a given UTC day.
+  async getEntryCountsBySource(dayKey) {
+    const data = await this.readDay(dayKey);
+    const events = Array.isArray(data?.events) ? data.events : [];
+
+    const bySource = {};
+    let total = 0;
+
+    for (const ev of events) {
+      if (!ev || ev.type !== "ENTRY") continue;
+      const src = String(ev.source || "").toUpperCase() || "UNKNOWN";
+      bySource[src] = (bySource[src] || 0) + 1;
+      total += 1;
+    }
+
+    return { dateKey: dayKey, total, bySource };
+  }
+
   async flush() {
     await this._queue;
   }

@@ -290,12 +290,13 @@ export class Monitor {
         pos.entryHitNotified = true;
       }
 
+      const originSource = String(pos.source || "AUTO").toUpperCase();
       await this.signalsRepo.logLifecycle({
-        source: pos.source || "AUTO",
+        source: "MONITOR",
         pos,
         event: ev.event,
         price: ev.price,
-        meta: { notifyChatIds: recipients.map(String) }
+        meta: { notifyChatIds: recipients.map(String), originSource }
       });
 
       this.positionsRepo.upsert(pos);

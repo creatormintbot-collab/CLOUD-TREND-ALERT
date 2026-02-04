@@ -4,6 +4,7 @@ export function startAutoScanJob({ run, intervalMs = 15_000, onError = null }) {
     if (busy) return;
     busy = true;
     try {
+      console.log("[AUTO_SCAN] tick start");
       await run();
     } catch (err) {
       try {
@@ -11,6 +12,7 @@ export function startAutoScanJob({ run, intervalMs = 15_000, onError = null }) {
         else console.error("[autoScanJob] run() failed:", err);
       } catch {}
     } finally {
+      console.log("[AUTO_SCAN] tick end");
       busy = false;
     }
   }, intervalMs);
