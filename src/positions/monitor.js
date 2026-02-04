@@ -250,6 +250,9 @@ export class Monitor {
 
       // Normalize + dedupe recipients to prevent partial delivery issues on broadcast.
       const recipients = Array.from(new Set((recipientsRaw || []).map(String)));
+      if (!Array.isArray(pos.notifyChatIds) || !pos.notifyChatIds.length) {
+        pos.notifyChatIds = recipients;
+      }
 
       // Precompute ENTRY CONFIRMED payload once, then broadcast to all recipients before setting notified flags.
       const shouldSendEntry =

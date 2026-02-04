@@ -158,6 +158,46 @@ async function listAllPositions(positionsRepo) {
   return [];
 }
 
+function normalizeChatId(chatId) {
+  return String(chatId);
+}
+
+function posBelongsToChat(pos, chatId) {
+  if (!pos) return false;
+  const cid = normalizeChatId(chatId);
+  if (String(pos.chatId) === cid) return true;
+
+  const notifyRaw = pos?.notifyChatIds;
+  const notifyList = Array.isArray(notifyRaw) ? notifyRaw : (notifyRaw != null ? [notifyRaw] : []);
+  const notify = notifyList.map(String);
+  if (notify.includes(cid)) return true;
+
+  const entryIds = pos?.telegram?.entryMessageIds;
+  if (entryIds && typeof entryIds === "object") {
+    if (Object.prototype.hasOwnProperty.call(entryIds, cid)) return true;
+  }
+
+  return false;
+}
+
+function filterEventsForChat(events, chatId) {
+  const cid = normalizeChatId(chatId);
+  const rows = Array.isArray(events) ? events : [];
+  return rows.filter((ev) => {
+    if (!ev) return false;
+    if (String(ev?.meta?.chatId) === cid) return true;
+    const metaNotifyRaw = ev?.meta?.notifyChatIds;
+    const metaNotifyList = Array.isArray(metaNotifyRaw) ? metaNotifyRaw : (metaNotifyRaw != null ? [metaNotifyRaw] : []);
+    const metaNotify = metaNotifyList.map(String);
+    if (metaNotify.includes(cid)) return true;
+    const posNotifyRaw = ev?.pos?.notifyChatIds;
+    const posNotifyList = Array.isArray(posNotifyRaw) ? posNotifyRaw : (posNotifyRaw != null ? [posNotifyRaw] : []);
+    const posNotify = posNotifyList.map(String);
+    if (posNotify.includes(cid)) return true;
+    return false;
+  });
+}
+
 
 async function readSignalsDayStats(signalsRepo, dayKey) {
   try {
@@ -231,15 +271,16 @@ function emptyLifecycleStats() {
   };
 }
 
-async function readLifecycleDayStats(signalsRepo, dayKey) {
+async function readLifecycleDayStats(signalsRepo, dayKey, chatId = null) {
   try {
     if (!signalsRepo || typeof signalsRepo.readDay !== "function") return null;
     const dk = String(dayKey || utcDateKeyNow());
     const data = await signalsRepo.readDay(dk);
     const events = Array.isArray(data?.events) ? data.events : [];
+    const scopedEvents = chatId != null ? filterEventsForChat(events, chatId) : events;
     const stats = emptyLifecycleStats();
 
-    for (const ev of events) {
+    for (const ev of scopedEvents) {
       if (!ev) continue;
       const type = String(ev.type || "").toUpperCase();
       const evt = String(ev.event || "").toUpperCase();
@@ -251,7 +292,7 @@ async function readLifecycleDayStats(signalsRepo, dayKey) {
       if (typeOk && evt === "TP3") stats.tp3Hits += 1;
     }
 
-    const outcomeSummary = summarizeOutcomesForDay(events, dk);
+    const outcomeSummary = summarizeOutcomesForDay(scopedEvents, dk);
     return {
       ...stats,
       winCount: outcomeSummary.winCount,
@@ -744,6 +785,7 @@ export class Commands {
 
     this.bot.onText(/^\/status\b/i, async (msg) => {
       const chatId = msg.chat.id;
+      const chatKey = normalizeChatId(chatId);
       const dateKey = utcDateKeyNow();
       const timeKey = utcTimeNow();
 
@@ -754,21 +796,22 @@ export class Commands {
       const totalCreated = autoSent + scanSignalsSent;
 
       const all = await listAllPositions(this.positionsRepo);
+      const scopedAll = (Array.isArray(all) ? all : []).filter((p) => posBelongsToChat(p, chatKey));
       const active = Array.isArray(this.positionsRepo.listActive?.()) ? this.positionsRepo.listActive() : all.filter(isActivePos);
       const activeList = Array.isArray(active) ? active : [];
+      const scopedActive = activeList.filter((p) => posBelongsToChat(p, chatKey));
       const startMs = startOfUtcDayMs(dateKey);
 
-      const openFilled = activeList.filter((p) => isActivePos(p) && entryHitTs(p) > 0).length;
-      const pendingEntry = activeList.filter((p) => isActivePos(p) && entryHitTs(p) === 0).length;
-      const carried = activeList.filter((p) => isActivePos(p) && Number(p?.createdAt || 0) > 0 && Number(p.createdAt) < startMs).length;
+      const openFilled = scopedActive.filter((p) => isActivePos(p) && entryHitTs(p) > 0).length;
+      const pendingEntry = scopedActive.filter((p) => isActivePos(p) && entryHitTs(p) === 0).length;
+      const carried = scopedActive.filter((p) => isActivePos(p) && Number(p?.createdAt || 0) > 0 && Number(p.createdAt) < startMs).length;
 
       const secondaryTf = String(this.env?.SECONDARY_TIMEFRAME || "4h").toLowerCase();
-      const intradayCount = activeList.filter((p) => inferPlaybookFromPos(p, secondaryTf) === "INTRADAY").length;
-      const swingCount = activeList.filter((p) => inferPlaybookFromPos(p, secondaryTf) === "SWING").length;
+      const intradayCount = scopedActive.filter((p) => inferPlaybookFromPos(p, secondaryTf) === "INTRADAY").length;
+      const swingCount = scopedActive.filter((p) => inferPlaybookFromPos(p, secondaryTf) === "SWING").length;
 
-      const lifecycle = await readLifecycleDayStats(this.signalsRepo, dateKey);
-      const progressStats = lifecycle || progressFromPositions(all, dateKey);
-      const outcomeStats = lifecycle || outcomesFromPositions(all, dateKey);
+      const progressStats = progressFromPositions(scopedAll, dateKey);
+      const outcomeStats = outcomesFromPositions(scopedAll, dateKey);
 
       const entryHits = Number(progressStats.entryHits || 0);
       const tp1Hits = Number(progressStats.tp1Hits || 0);
@@ -807,19 +850,23 @@ export class Commands {
     });
 
     this.bot.onText(/^\/statusopen\b/i, async (msg) => {
+      const chatId = msg.chat.id;
+      const chatKey = normalizeChatId(chatId);
       const dateKey = utcDateKeyNow();
       const timeKey = utcTimeNow();
 
       const all = await listAllPositions(this.positionsRepo);
+      const scopedAll = (Array.isArray(all) ? all : []).filter((p) => posBelongsToChat(p, chatKey));
       const active = Array.isArray(this.positionsRepo.listActive?.()) ? this.positionsRepo.listActive() : all.filter(isActivePos);
       const activeList = Array.isArray(active) ? active : [];
+      const scopedActive = activeList.filter((p) => posBelongsToChat(p, chatKey));
       const startMs = startOfUtcDayMs(dateKey);
 
-      const openFilled = activeList.filter((p) => isActivePos(p) && entryHitTs(p) > 0).length;
-      const pendingEntry = activeList.filter((p) => isActivePos(p) && entryHitTs(p) === 0).length;
-      const carried = activeList.filter((p) => isActivePos(p) && Number(p?.createdAt || 0) > 0 && Number(p.createdAt) < startMs).length;
+      const openFilled = scopedActive.filter((p) => isActivePos(p) && entryHitTs(p) > 0).length;
+      const pendingEntry = scopedActive.filter((p) => isActivePos(p) && entryHitTs(p) === 0).length;
+      const carried = scopedActive.filter((p) => isActivePos(p) && Number(p?.createdAt || 0) > 0 && Number(p.createdAt) < startMs).length;
 
-      const rows = activeList
+      const rows = scopedActive
         .slice()
         .sort((a, b) => Number(b?.createdAt || 0) - Number(a?.createdAt || 0))
         .map((p) => {
@@ -832,7 +879,7 @@ export class Commands {
       const moreCount = Math.max(0, rows.length - list.length);
 
       await this.sender.sendText(
-        msg.chat.id,
+        chatId,
         statusOpenCard({
           timeKey,
           showing: list.length,
@@ -846,35 +893,23 @@ export class Commands {
     });
 
     this.bot.onText(/^\/statusclosed\b/i, async (msg) => {
+      const chatId = msg.chat.id;
+      const chatKey = normalizeChatId(chatId);
       const dateKey = utcDateKeyNow();
 
       const all = await listAllPositions(this.positionsRepo);
-      const lifecycle = await readLifecycleDayStats(this.signalsRepo, dateKey);
+      const scopedAll = (Array.isArray(all) ? all : []).filter((p) => posBelongsToChat(p, chatKey));
+      const lifecycle = await readLifecycleDayStats(this.signalsRepo, dateKey, chatKey);
       const outcomeById = lifecycle?.outcomeById || null;
-      const closedTodayList = (Array.isArray(all) ? all : [])
+      const closedTodayList = scopedAll
         .filter((p) => closedAtTs(p) > 0)
         .filter((p) => sameUtcDay(closedAtTs(p), dateKey));
 
-      let tradingClosed = 0;
-      let winCount = 0;
-      let directSlCount = 0;
-      let expiredCount = 0;
-
-      if (lifecycle) {
-        tradingClosed = Number(lifecycle.tradingClosed || 0);
-        winCount = Number(lifecycle.winCount || 0);
-        directSlCount = Number(lifecycle.directSlCount || 0);
-        expiredCount = Number(lifecycle.expiredCount || 0);
-      } else {
-        const tradingClosedList = closedTodayList.filter((p) => !isExpiredPos(p));
-        for (const p of tradingClosedList) {
-          const derived = deriveOutcomeForState(buildStateFromPosition(p));
-          if (derived.outcome === "WIN") winCount += 1;
-          else if (derived.outcome === "LOSS") directSlCount += 1;
-        }
-        tradingClosed = winCount + directSlCount;
-        expiredCount = closedTodayList.filter((p) => isExpiredPos(p)).length;
-      }
+      const outcomeStats = outcomesFromPositions(scopedAll, dateKey);
+      const tradingClosed = Number(outcomeStats.tradingClosed || 0);
+      const winCount = Number(outcomeStats.winCount || 0);
+      const directSlCount = Number(outcomeStats.directSlCount || 0);
+      const expiredCount = Number(outcomeStats.expiredCount || 0);
       const rows = closedTodayList
         .slice()
         .sort((a, b) => Number(closedAtTs(b) || 0) - Number(closedAtTs(a) || 0))
@@ -888,7 +923,7 @@ export class Commands {
       const moreCount = Math.max(0, rows.length - list.length);
 
       await this.sender.sendText(
-        msg.chat.id,
+        chatId,
         statusClosedCard({
           dateKey,
           tradingClosed,
@@ -902,6 +937,8 @@ export class Commands {
     });
 
     this.bot.onText(/^\/cohort\b(.*)$/i, async (msg, match) => {
+      const chatId = msg.chat.id;
+      const chatKey = normalizeChatId(chatId);
       const raw = (match?.[1] || "").trim();
       const args = raw ? raw.split(/\s+/).filter(Boolean) : [];
       const dateArg = args[0] ? parseDateKeyArg(args[0]) : null;
@@ -913,7 +950,8 @@ export class Commands {
 
       if (!args.length || String(args[0] || "").toLowerCase() === "active") {
         const all = await listAllPositions(this.positionsRepo);
-        const cohortPositions = (Array.isArray(all) ? all : [])
+        const scopedAll = (Array.isArray(all) ? all : []).filter((p) => posBelongsToChat(p, chatKey));
+        const cohortPositions = scopedAll
           .filter((p) => {
             const createdAt = Number(p?.createdAt || 0);
             if (!Number.isFinite(createdAt) || createdAt <= 0) return false;
@@ -923,7 +961,8 @@ export class Commands {
 
         const cohortIds = new Set(cohortPositions.map((p) => p?.id).filter(Boolean));
         const events = await readSignalsEventsRange(this.signalsRepo, range.keys);
-        const cohortEvents = events.filter((ev) => cohortIds.has(ev?.positionId));
+        const scopedEvents = filterEventsForChat(events, chatKey);
+        const cohortEvents = scopedEvents.filter((ev) => cohortIds.has(ev?.positionId));
 
         const createdStats = createdRangeFromPositions(cohortPositions, range.keys);
         const totalCreated = Number(createdStats.totalCreated ?? (createdStats.autoSent + createdStats.scanSignalsSent) ?? 0);
@@ -1017,12 +1056,14 @@ export class Commands {
       }
 
       const all = await listAllPositions(this.positionsRepo);
-      const cohort = (Array.isArray(all) ? all : [])
+      const scopedAll = (Array.isArray(all) ? all : []).filter((p) => posBelongsToChat(p, chatKey));
+      const cohort = scopedAll
         .filter((p) => sameUtcDay(Number(p?.createdAt || 0), dateArg));
 
       const cohortIds = new Set(cohort.map((p) => p?.id).filter(Boolean));
       const events = await readSignalsEventsRange(this.signalsRepo, range.keys);
-      const cohortEvents = events.filter((ev) => cohortIds.has(ev?.positionId));
+      const scopedEvents = filterEventsForChat(events, chatKey);
+      const cohortEvents = scopedEvents.filter((ev) => cohortIds.has(ev?.positionId));
       const stateById = buildPositionStateMapFromEvents(cohortEvents);
 
       const openList = cohort.filter((p) => isActivePos(p));
@@ -1048,11 +1089,7 @@ export class Commands {
       const tradingClosed = winCount + directSlCount;
       const closedCount = tradingClosed;
 
-      const createdStats = await resolveCreatedStats({
-        dateKey: dateArg,
-        stateRepo: this.stateRepo,
-        signalsRepo: this.signalsRepo
-      });
+      const createdStats = createdRangeFromPositions(cohort, [dateArg]);
 
       const listMode = ["open", "closed", "recent"].includes(filterArg) ? filterArg : "open";
       let rows = [];
@@ -1104,7 +1141,7 @@ export class Commands {
       const ageDays = Math.max(0, Math.floor((startOfUtcDayMs(todayKey) - startOfUtcDayMs(dateArg)) / DAY_MS));
 
       await this.sender.sendText(
-        msg.chat.id,
+        chatId,
         cohortDetailCard({
           dateKey: dateArg,
           ageDays,
@@ -1131,6 +1168,7 @@ export class Commands {
 
     this.bot.onText(/^\/info\b(.*)$/i, async (msg, match) => {
       const chatId = msg.chat.id;
+      const chatKey = normalizeChatId(chatId);
       const raw = (match?.[1] || "").trim();
       const args = raw ? raw.split(/\s+/).filter(Boolean) : [];
 
@@ -1172,9 +1210,9 @@ export class Commands {
       });
 
       const all = await listAllPositions(this.positionsRepo);
-      const lifecycle = await readLifecycleDayStats(this.signalsRepo, dateKey);
-      const progressStats = lifecycle || progressFromPositions(all, dateKey);
-      const outcomeStats = lifecycle || outcomesFromPositions(all, dateKey);
+      const scopedAll = (Array.isArray(all) ? all : []).filter((p) => posBelongsToChat(p, chatKey));
+      const progressStats = progressFromPositions(scopedAll, dateKey);
+      const outcomeStats = outcomesFromPositions(scopedAll, dateKey);
 
       const entryHits = Number(progressStats.entryHits || 0);
       const tp1Hits = Number(progressStats.tp1Hits || 0);
@@ -1211,6 +1249,7 @@ export class Commands {
     });
     this.bot.onText(/^\/scan\b(.*)$/i, async (msg, match) => {
       const chatId = msg.chat.id;
+      const chatKey = normalizeChatId(chatId);
       const userId = msg.from?.id ?? 0;
       const todayKey = utcDateKeyNow();
 
@@ -1495,6 +1534,15 @@ export class Commands {
                   ? { entryMessageIds: { [String(chatId)]: entryMsg.message_id } }
                   : null
               });
+
+              pos.chatId = chatKey;
+              if (Array.isArray(pos.notifyChatIds) && pos.notifyChatIds.length) {
+                const merged = new Set(pos.notifyChatIds.map(String));
+                merged.add(chatKey);
+                pos.notifyChatIds = Array.from(merged);
+              } else {
+                pos.notifyChatIds = [chatKey];
+              }
 
               pos.createdAt = pos.createdAt || Date.now();
               pos.expiresAt = pos.expiresAt || (pos.createdAt + ttlMsForTf(pos.tf));
@@ -1844,6 +1892,15 @@ if (primaryDuplicatePos) {
           : null
       });
 
+      pos.chatId = chatKey;
+      if (Array.isArray(pos.notifyChatIds) && pos.notifyChatIds.length) {
+        const merged = new Set(pos.notifyChatIds.map(String));
+        merged.add(chatKey);
+        pos.notifyChatIds = Array.from(merged);
+      } else {
+        pos.notifyChatIds = [chatKey];
+      }
+
       // Entry lifecycle normalization (non-breaking, but prevents false TP/SL before entry is filled)
       pos.createdAt = pos.createdAt || Date.now();
       pos.expiresAt = pos.expiresAt || (pos.createdAt + ttlMsForTf(pos.tf));
@@ -1917,6 +1974,15 @@ if (primaryDuplicatePos) {
                 ? { entryMessageIds: { [String(chatId)]: entryMsg2.message_id } }
                 : null
             });
+
+            pos2.chatId = chatKey;
+            if (Array.isArray(pos2.notifyChatIds) && pos2.notifyChatIds.length) {
+              const merged = new Set(pos2.notifyChatIds.map(String));
+              merged.add(chatKey);
+              pos2.notifyChatIds = Array.from(merged);
+            } else {
+              pos2.notifyChatIds = [chatKey];
+            }
 
             pos2.createdAt = pos2.createdAt || Date.now();
             pos2.expiresAt = pos2.expiresAt || (pos2.createdAt + ttlMsForTf(pos2.tf));
