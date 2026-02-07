@@ -11,6 +11,7 @@ import { finalScore } from "./scoring/finalScore.js";
 import { btcMacro } from "./macro/btcMacro.js";
 import { ctaProTrendGate } from "./ctaProTrend.js";
 import { intradaySrTradePlan } from "./intraday/intradaySrTradePlan.js";
+export { evaluateDmHarmonicPotential, evaluateDmHarmonicComplete } from "./dmHarmonic.js";
 
 import {
   HTF_HARD_GATE_ENABLED,

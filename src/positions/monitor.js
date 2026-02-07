@@ -107,7 +107,7 @@ export class Monitor {
     this.run = limitConcurrency(6);
   }
 
-  async tick(fallbackChatIdsToNotify = []) {
+  async tick() {
     const active = this.positionsRepo.listActive();
     if (!active.length) return;
 
@@ -244,15 +244,27 @@ export class Monitor {
         this.stateRepo.bumpOutcome(pos.closedAt, isWinOutcome(pos.closeOutcome));
       }
 
-      const recipientsRaw = (Array.isArray(pos.notifyChatIds) && pos.notifyChatIds.length)
-        ? pos.notifyChatIds
-        : fallbackChatIdsToNotify;
+      let recipientsRaw = [];
+      if (Array.isArray(pos.notifyChatIds) && pos.notifyChatIds.length) {
+        recipientsRaw = pos.notifyChatIds;
+      } else if (pos.chatId !== undefined && pos.chatId !== null && String(pos.chatId).trim() !== "") {
+        recipientsRaw = [String(pos.chatId)];
+      } else if (pos.scopeId) {
+        const scope = String(pos.scopeId || "");
+        if (scope.startsWith("u:")) {
+          const uid = scope.slice(2).trim();
+          if (/^\d+$/.test(uid)) recipientsRaw = [uid];
+        } else if (scope.startsWith("g:")) {
+          const gid = scope.slice(2).trim();
+          if (gid) recipientsRaw = [gid];
+        } else if (scope.startsWith("c:")) {
+          const cid = scope.slice(2).trim();
+          if (cid) recipientsRaw = [cid];
+        }
+      }
 
       // Normalize + dedupe recipients to prevent partial delivery issues on broadcast.
       const recipients = Array.from(new Set((recipientsRaw || []).map(String)));
-      if (!Array.isArray(pos.notifyChatIds) || !pos.notifyChatIds.length) {
-        pos.notifyChatIds = recipients;
-      }
 
       // Precompute ENTRY CONFIRMED payload once, then broadcast to all recipients before setting notified flags.
       const shouldSendEntry =
@@ -266,28 +278,30 @@ export class Monitor {
           )
         : null;
 
-      for (const chatId of recipients) {
-        const replyTo =
-          pos?.telegram?.entryMessageIds?.[String(chatId)] ??
-          pos?.telegram?.entryMessageId ??
-          null;
+      if (recipients.length) {
+        for (const chatId of recipients) {
+          const replyTo =
+            pos?.telegram?.entryMessageIds?.[String(chatId)] ??
+            pos?.telegram?.entryMessageId ??
+            null;
 
-        const send = replyTo
-          ? (text) => this.sender.sendTextReply(chatId, replyTo, text)
-          : (text) => this.sender.sendText(chatId, text);
+          const send = replyTo
+            ? (text) => this.sender.sendTextReply(chatId, replyTo, text)
+            : (text) => this.sender.sendText(chatId, text);
 
-        if (ev.event === "TP1") await send(this.cards.tp1Card(pos));
-        else if (ev.event === "TP2") await send(this.cards.tp2Card(pos));
-        else if (ev.event === "TP3") await send(this.cards.tp3Card(pos));
-        else if (ev.event === "SL") await send(this.cards.slCard(pos));
-        else if (ev.event === "FILLED") {
-          if (entryText) await send(entryText);
+          if (ev.event === "TP1") await send(this.cards.tp1Card(pos));
+          else if (ev.event === "TP2") await send(this.cards.tp2Card(pos));
+          else if (ev.event === "TP3") await send(this.cards.tp3Card(pos));
+          else if (ev.event === "SL") await send(this.cards.slCard(pos));
+          else if (ev.event === "FILLED") {
+            if (entryText) await send(entryText);
+          }
+          // EXPIRED is tracked in logs/state, but not sent to chat by default.
         }
-        // EXPIRED is tracked in logs/state, but not sent to chat by default.
       }
 
-      // Mark ENTRY CONFIRMED as notified only AFTER broadcasting to all notifyChatIds.
-      if (entryText && recipients.length) {
+      // Mark ENTRY CONFIRMED as notified after processing (even if no recipients).
+      if (entryText) {
         pos.entryHitNotifiedAt = Number(pos.filledAt) || Date.now();
         pos.entryHitAt = pos.entryHitAt || pos.entryHitNotifiedAt;
         pos.entryHitNotified = true;
@@ -299,7 +313,7 @@ export class Monitor {
         pos,
         event: ev.event,
         price: ev.price,
-        meta: { notifyChatIds: recipients.map(String), originSource }
+        meta: { notifyChatIds: recipients.map(String), originSource, scopeId: pos?.scopeId, strategyKey: pos?.strategyKey }
       });
 
       this.positionsRepo.upsert(pos);

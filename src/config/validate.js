@@ -103,4 +103,37 @@ export function validateEnvOrThrow() {
   if (!Number.isFinite(env.ENTRY_CONFIRM_MAX_WAIT_MS) || Number(env.ENTRY_CONFIRM_MAX_WAIT_MS) < 0) {
     throw new Error("ENTRY_CONFIRM_MAX_WAIT_MS must be a finite number >= 0");
   }
+
+  const idLike = (v) => /^-?\d+$/.test(String(v || "").trim());
+
+  const requiredChannelId = String(env.REQUIRED_SUBSCRIBE_CHANNEL_ID || "").trim();
+  if (!requiredChannelId) {
+    throw new Error("Missing REQUIRED_SUBSCRIBE_CHANNEL_ID");
+  }
+  if (!idLike(requiredChannelId)) {
+    throw new Error(`REQUIRED_SUBSCRIBE_CHANNEL_ID invalid: ${env.REQUIRED_SUBSCRIBE_CHANNEL_ID}`);
+  }
+  if (!requiredChannelId.startsWith("-100")) {
+    throw new Error("REQUIRED_SUBSCRIBE_CHANNEL_ID must start with -100");
+  }
+
+  const badChannels = (env.ALLOWED_CHANNEL_IDS || []).filter((id) => !idLike(id));
+  if (badChannels.length) {
+    throw new Error(`ALLOWED_CHANNEL_IDS contains invalid id(s): ${badChannels.join(", ")}`);
+  }
+
+  const badAdmins = (env.ADMIN_USER_IDS || []).filter((id) => !/^\d+$/.test(String(id || "").trim()));
+  if (badAdmins.length) {
+    throw new Error(`ADMIN_USER_IDS contains invalid id(s): ${badAdmins.join(", ")}`);
+  }
+
+  if (!Number.isFinite(env.DM_FREE_SCAN_LIMIT) || Number(env.DM_FREE_SCAN_LIMIT) < 0) {
+    throw new Error("DM_FREE_SCAN_LIMIT must be a finite number >= 0");
+  }
+  if (!Number.isFinite(env.DM_FREE_AUTO_LIMIT) || Number(env.DM_FREE_AUTO_LIMIT) < 0) {
+    throw new Error("DM_FREE_AUTO_LIMIT must be a finite number >= 0");
+  }
+  if (!Number.isFinite(env.DM_PREMIUM_AUTO_LIMIT) || Number(env.DM_PREMIUM_AUTO_LIMIT) < 0) {
+    throw new Error("DM_PREMIUM_AUTO_LIMIT must be a finite number >= 0");
+  }
 }

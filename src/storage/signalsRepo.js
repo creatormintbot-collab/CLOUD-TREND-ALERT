@@ -228,9 +228,18 @@ export class SignalsRepo {
     return false;
   }
 
-  async getDayStats(dayKey) {
+  async getDayStats(dayKeyOrOpts) {
+    let dayKey = dayKeyOrOpts;
+    let scopeId = null;
+    if (dayKeyOrOpts && typeof dayKeyOrOpts === "object") {
+      dayKey = dayKeyOrOpts.dayKey;
+      scopeId = dayKeyOrOpts.scopeId ?? null;
+    }
     const data = await this.readDay(dayKey);
-    const events = Array.isArray(data?.events) ? data.events : [];
+    const eventsRaw = Array.isArray(data?.events) ? data.events : [];
+    const events = scopeId
+      ? eventsRaw.filter((ev) => String(ev?.scopeId ?? ev?.meta?.scopeId || "") === String(scopeId))
+      : eventsRaw;
 
     const stats = {
       dateKey: dayKey,

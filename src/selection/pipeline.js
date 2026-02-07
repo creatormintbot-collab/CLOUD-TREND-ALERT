@@ -1,4 +1,4 @@
-import { evaluateSignal, explainSignal, evaluateIntradayTradePlan } from "../strategy/signalEngine.js";
+import { evaluateSignal, explainSignal, evaluateIntradayTradePlan, evaluateDmHarmonicPotential, evaluateDmHarmonicComplete } from "../strategy/signalEngine.js";
 import { macdGate } from "../strategy/scoring/proScore.js";
 import { macd } from "../strategy/indicators/macd.js";
 import { INTRADAY_SCAN_TOP_N, INTRADAY_MIN_CANDLES, INTRADAY_TIMEFRAMES, SWING_SCAN_TOP_N } from "../config/constants.js";
@@ -11,6 +11,64 @@ function normTf(tf) {
 function isSwingTf(tf, env) {
   const swing = normTf(env?.SECONDARY_TIMEFRAME || "4h");
   return normTf(tf) === swing;
+}
+
+function mapIntradayPlanToSignal(plan = {}) {
+  const entry = Number(plan?.levels?.entry ?? plan?.entry);
+  const sl = plan?.levels?.sl ?? plan?.sl;
+  const tp1 = plan?.levels?.tp1 ?? plan?.tp1;
+  const tp2 = plan?.levels?.tp2 ?? plan?.tp2;
+  const tp3 = plan?.levels?.tp3 ?? plan?.tp3;
+
+  const tol = Number(plan?.tolerance);
+  const zone = Number.isFinite(tol) ? tol : 0;
+
+  const entryLow = Number.isFinite(entry) ? (entry - zone) : null;
+  const entryHigh = Number.isFinite(entry) ? (entry + zone) : null;
+  const entryMid = Number.isFinite(entry) ? entry : null;
+
+  return {
+    symbol: plan.symbol,
+    tf: plan.tf || "15m",
+    direction: plan.direction,
+    playbook: "INTRADAY",
+    score: plan.score,
+    candleCloseTime: plan.candleCloseTime,
+    candles: plan.candles || [],
+    strategyKey: plan.strategyKey || "PRO",
+    levels: { entryLow, entryHigh, entryMid, sl, tp1, tp2, tp3 }
+  };
+}
+
+function signalKey(sig) {
+  const sym = String(sig?.symbol || "").toUpperCase();
+  const tf = String(sig?.tf || "").toLowerCase();
+  const dirRaw = String(sig?.direction || "").toUpperCase();
+  const dir = dirRaw.startsWith("SHORT") ? "SHORT" : (dirRaw.startsWith("LONG") ? "LONG" : dirRaw);
+  return `${sym}|${tf}|${dir}`;
+}
+
+function dedupSignals(list, seen) {
+  const out = [];
+  const used = seen || new Set();
+  for (const sig of (Array.isArray(list) ? list : [])) {
+    const key = signalKey(sig);
+    if (!key || used.has(key)) continue;
+    used.add(key);
+    out.push(sig);
+  }
+  return out;
+}
+
+function pickBestByPlaybook(list, swingTf) {
+  const swing = [];
+  const intraday = [];
+  for (const sig of (Array.isArray(list) ? list : [])) {
+    const tf = String(sig?.tf || "").toLowerCase();
+    if (tf === String(swingTf || "4h").toLowerCase()) swing.push(sig);
+    else intraday.push(sig);
+  }
+  return { swing: swing[0] || null, intraday: intraday[0] || null };
 }
 
 export class Pipeline {
@@ -472,5 +530,214 @@ async _maybeWarmupKlines(symbols, tfs, reason = "scan", opts = {}) {
     candidates.sort((a, b) => b.score - a.score);
     this.lastAutoStats = { ...stats };
     return candidates;
+  }
+
+  async _dmHarmonicCandidates({ symbols = [], tfs = [], mode = "potential", limit = 5 } = {}) {
+    const list = Array.isArray(symbols) ? symbols : [];
+    const timeframes = Array.isArray(tfs) ? tfs.map((x) => normTf(x)).filter(Boolean) : [];
+    if (!list.length || !timeframes.length) return [];
+
+    try {
+      const warmRows = await this.topVolumeCached(Math.max(12, this.env.TOP10_PER_TF || 10));
+      const warmSymbols = (warmRows && warmRows.length ? warmRows.map((r) => String(r.symbol || "").toUpperCase()) : list);
+      await this._maybeWarmupKlines(warmSymbols, timeframes, "dmHarmonic", { minCandles: INTRADAY_MIN_CANDLES, maxSyms: 12 });
+    } catch {}
+
+    const evaluator = mode === "complete" ? evaluateDmHarmonicComplete : evaluateDmHarmonicPotential;
+    const candidates = [];
+
+    for (const tf of timeframes) {
+      const scored = list
+        .map((s) => ({ symbol: String(s || "").toUpperCase(), tf, fast: this.ranker.fastScore(String(s || "").toUpperCase(), tf, this.thresholds) }))
+        .filter((r) => r.symbol && r.fast > 0)
+        .sort((a, b) => b.fast - a.fast)
+        .slice(0, this.env.TOP10_PER_TF || 10);
+
+      for (const row of scored) {
+        const candles = this.klines.getCandles(row.symbol, row.tf) || [];
+        const res = evaluator(row.symbol, row.tf, candles);
+        if (res) candidates.push(res);
+      }
+    }
+
+    candidates.sort((a, b) => (b.score || 0) - (a.score || 0));
+    return candidates.slice(0, Number.isFinite(limit) ? limit : 5);
+  }
+
+  async pickDmScanNewHarmonic({ intradayTfs = ["30m", "1h"], swingTf = "4h", limits = { intraday: 2, swing: 1 } } = {}) {
+    const symbols = (typeof this.universe.symbolsForScan === "function" ? this.universe.symbolsForScan() : this.universe.symbols?.()) || [];
+    const intraday = await this._dmHarmonicCandidates({ symbols, tfs: intradayTfs, mode: "potential", limit: limits?.intraday ?? 2 });
+    const swing = await this._dmHarmonicCandidates({ symbols, tfs: [swingTf], mode: "complete", limit: limits?.swing ?? 1 });
+    return { intraday, swing };
+  }
+
+  async pickDmScanHybrid({ intradayTfs = ["30m", "1h"], swingTf = "4h", limits = { intraday: 2, swing: 1 } } = {}) {
+    const limIntra = Number(limits?.intraday ?? 2);
+    const limSwing = Number(limits?.swing ?? 1);
+
+    const fresh = await this.pickDmScanNewHarmonic({ intradayTfs, swingTf, limits: { intraday: limIntra, swing: limSwing } });
+    const seen = new Set();
+
+    const newIntraday = dedupSignals(fresh?.intraday || [], seen).slice(0, limIntra);
+    const newSwing = dedupSignals(fresh?.swing || [], seen).slice(0, limSwing);
+
+    let proIntradayPlans = [];
+    let proSwingSignals = [];
+    try {
+      proIntradayPlans = await this.scanIntradayPlans({ limit: Math.max(6, limIntra * 3) });
+    } catch {}
+    try {
+      proSwingSignals = await this.scanSwingSignals({ limit: Math.max(3, limSwing * 3) });
+    } catch {}
+
+    const proIntradaySignals = dedupSignals(
+      proIntradayPlans.map(mapIntradayPlanToSignal).map((s) => ({ ...s, strategyKey: "PRO" })),
+      seen
+    );
+    const proSwing = dedupSignals(
+      proSwingSignals.map((s) => ({ ...s, strategyKey: s?.strategyKey || "PRO" })),
+      seen
+    );
+
+    const intraday = [...newIntraday];
+    for (const sig of proIntradaySignals) {
+      if (intraday.length >= limIntra) break;
+      intraday.push(sig);
+    }
+
+    const swing = [...newSwing];
+    for (const sig of proSwing) {
+      if (swing.length >= limSwing) break;
+      swing.push(sig);
+    }
+
+    return { intraday, swing };
+  }
+
+  async pickAutoChannelHybrid({ intradayTfs = ["30m", "1h"], swingTf = "4h", limit = 2 } = {}) {
+    const symbols = (typeof this.universe.symbolsForAuto === "function" ? this.universe.symbolsForAuto() : this.universe.symbols?.()) || [];
+    const tfs = Array.from(new Set([...(intradayTfs || []), swingTf].map((x) => normTf(x)).filter(Boolean)));
+    const newCandidates = await this._dmHarmonicCandidates({ symbols, tfs, mode: "complete", limit: 12 });
+    const proCandidatesRaw = await this.autoPickCandidates();
+    const proCandidates = Array.isArray(proCandidatesRaw) ? proCandidatesRaw.map((s) => ({ ...s, strategyKey: s?.strategyKey || "PRO" })) : [];
+
+    const newSorted = dedupSignals(newCandidates).sort((a, b) => (b.score || 0) - (a.score || 0));
+    const proSorted = dedupSignals(proCandidates).sort((a, b) => (b.score || 0) - (a.score || 0));
+
+    const pick = [];
+    const seen = new Set();
+
+    const newBest = pickBestByPlaybook(newSorted, swingTf);
+    if (newBest.swing) {
+      pick.push(newBest.swing);
+      seen.add(signalKey(newBest.swing));
+    }
+    if (newBest.intraday && pick.length < limit) {
+      const key = signalKey(newBest.intraday);
+      if (!seen.has(key)) {
+        pick.push(newBest.intraday);
+        seen.add(key);
+      }
+    }
+
+    if (pick.length < limit) {
+      const proBest = pickBestByPlaybook(proSorted, swingTf);
+      if (!newBest.swing && proBest.swing && pick.length < limit) {
+        const key = signalKey(proBest.swing);
+        if (!seen.has(key)) {
+          pick.push(proBest.swing);
+          seen.add(key);
+        }
+      }
+      if (!newBest.intraday && proBest.intraday && pick.length < limit) {
+        const key = signalKey(proBest.intraday);
+        if (!seen.has(key)) {
+          pick.push(proBest.intraday);
+          seen.add(key);
+        }
+      }
+    }
+
+    if (pick.length < limit) {
+      for (const sig of proSorted) {
+        if (pick.length >= limit) break;
+        const key = signalKey(sig);
+        if (!seen.has(key)) {
+          pick.push(sig);
+          seen.add(key);
+        }
+      }
+    }
+
+    return pick.slice(0, limit);
+  }
+
+  async pickAutoDm({ tier = "FREE", intradayTfs = ["30m", "1h"], swingTf = "4h", limit = 2 } = {}) {
+    const t = String(tier || "FREE").toUpperCase();
+    const symbols = (typeof this.universe.symbolsForAuto === "function" ? this.universe.symbolsForAuto() : this.universe.symbols?.()) || [];
+    const tfs = Array.from(new Set([...(intradayTfs || []), swingTf].map((x) => normTf(x)).filter(Boolean)));
+    const newCandidates = await this._dmHarmonicCandidates({ symbols, tfs, mode: "complete", limit: 12 });
+
+    if (t !== "PREMIUM") {
+      const newSorted = dedupSignals(newCandidates).sort((a, b) => (b.score || 0) - (a.score || 0));
+      const best = pickBestByPlaybook(newSorted, swingTf);
+      const out = [];
+      if (best.swing) out.push(best.swing);
+      if (best.intraday && out.length < limit) out.push(best.intraday);
+      return out.slice(0, limit);
+    }
+
+    const proCandidatesRaw = await this.autoPickCandidates();
+    const proCandidates = Array.isArray(proCandidatesRaw) ? proCandidatesRaw.map((s) => ({ ...s, strategyKey: s?.strategyKey || "PRO" })) : [];
+
+    const newSorted = dedupSignals(newCandidates).sort((a, b) => (b.score || 0) - (a.score || 0));
+    const proSorted = dedupSignals(proCandidates).sort((a, b) => (b.score || 0) - (a.score || 0));
+
+    const pick = [];
+    const seen = new Set();
+
+    const newBest = pickBestByPlaybook(newSorted, swingTf);
+    if (newBest.swing) {
+      pick.push(newBest.swing);
+      seen.add(signalKey(newBest.swing));
+    }
+    if (newBest.intraday && pick.length < limit) {
+      const key = signalKey(newBest.intraday);
+      if (!seen.has(key)) {
+        pick.push(newBest.intraday);
+        seen.add(key);
+      }
+    }
+
+    if (pick.length < limit) {
+      const proBest = pickBestByPlaybook(proSorted, swingTf);
+      if (!newBest.swing && proBest.swing && pick.length < limit) {
+        const key = signalKey(proBest.swing);
+        if (!seen.has(key)) {
+          pick.push(proBest.swing);
+          seen.add(key);
+        }
+      }
+      if (!newBest.intraday && proBest.intraday && pick.length < limit) {
+        const key = signalKey(proBest.intraday);
+        if (!seen.has(key)) {
+          pick.push(proBest.intraday);
+          seen.add(key);
+        }
+      }
+    }
+
+    if (pick.length < limit) {
+      for (const sig of proSorted) {
+        if (pick.length >= limit) break;
+        const key = signalKey(sig);
+        if (!seen.has(key)) {
+          pick.push(sig);
+          seen.add(key);
+        }
+      }
+    }
+
+    return pick.slice(0, limit);
   }
 }

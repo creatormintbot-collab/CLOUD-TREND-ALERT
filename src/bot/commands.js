@@ -10,6 +10,8 @@ import { createPositionFromSignal } from "../positions/positionModel.js";
 import { buildPositionStateMapFromEvents, deriveOutcomeForState, summarizeOutcomesForDay, buildStateFromPosition } from "../positions/outcomes.js";
 import { inc as incGroupStat, readDay as readGroupStatsDay } from "../storage/groupStatsRepo.js";
 import { INTRADAY_COOLDOWN_MINUTES } from "../config/constants.js";
+import { resolveScopeIdFromMessage } from "./scope.js";
+import { shouldAutoLeave, restrictedText } from "./accessPolicy.js";
 
 function mapIntradayPlanToSignal(plan = {}) {
   const entry = Number(plan?.levels?.entry ?? plan?.entry);
@@ -52,6 +54,42 @@ function mapIntradayPlanToSignal(plan = {}) {
   };
 
   return { displaySignal, positionSignal };
+}
+
+function isDmMessage(msg) {
+  return String(msg?.chat?.type || "").toLowerCase() === "private";
+}
+
+function resolveScopeId(msg) {
+  return resolveScopeIdFromMessage(msg);
+}
+
+function posBelongsToScope(pos, scopeId) {
+  if (!pos || !scopeId) return false;
+  return String(pos.scopeId || "") === String(scopeId);
+}
+
+function isAdminUser(userId, env) {
+  const list = Array.isArray(env?.ADMIN_USER_IDS) ? env.ADMIN_USER_IDS : [];
+  return list.map(String).includes(String(userId));
+}
+
+function formatRemainingTime(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n <= 0) return "Expired";
+  const days = Math.floor(n / 86400000);
+  const hours = Math.floor((n % 86400000) / 3600000);
+  const mins = Math.floor((n % 3600000) / 60000);
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${mins}m`;
+  return `${mins}m`;
+}
+
+function filterEventsForScopeId(events, scopeId) {
+  const sid = String(scopeId || "");
+  const rows = Array.isArray(events) ? events : [];
+  if (!sid) return rows;
+  return rows.filter((ev) => String((ev?.scopeId ?? ev?.meta?.scopeId ?? "")) === sid);
 }
 function utcDateKeyNow() {
   return new Date().toISOString().slice(0, 10);
@@ -199,14 +237,15 @@ function filterEventsForChat(events, chatId) {
 }
 
 
-async function readSignalsDayStats(signalsRepo, dayKey) {
+async function readSignalsDayStats(signalsRepo, dayKey, scopeId = null) {
   try {
     if (!signalsRepo) return null;
     const dk = String(dayKey || utcDateKeyNow());
     if (typeof signalsRepo.readDay !== "function") return null;
 
     const data = await signalsRepo.readDay(dk);
-    const events = Array.isArray(data?.events) ? data.events : [];
+    const eventsRaw = Array.isArray(data?.events) ? data.events : [];
+    const events = scopeId ? filterEventsForScopeId(eventsRaw, scopeId) : eventsRaw;
 
     const stats = {
       autoSignalsSent: 0,
@@ -271,13 +310,15 @@ function emptyLifecycleStats() {
   };
 }
 
-async function readLifecycleDayStats(signalsRepo, dayKey, chatId = null) {
+async function readLifecycleDayStats(signalsRepo, dayKey, chatId = null, scopeId = null) {
   try {
     if (!signalsRepo || typeof signalsRepo.readDay !== "function") return null;
     const dk = String(dayKey || utcDateKeyNow());
     const data = await signalsRepo.readDay(dk);
     const events = Array.isArray(data?.events) ? data.events : [];
-    const scopedEvents = chatId != null ? filterEventsForChat(events, chatId) : events;
+    const scopedEvents = scopeId
+      ? filterEventsForScopeId(events, scopeId)
+      : (chatId != null ? filterEventsForChat(events, chatId) : events);
     const stats = emptyLifecycleStats();
 
     for (const ev of scopedEvents) {
@@ -734,7 +775,7 @@ function formatDuplicateNotice({ symbol, tf, pos }) {
 }
 
 export class Commands {
-  constructor({ bot, sender, progressUi, pipeline, stateRepo, positionsRepo, signalsRepo, env }) {
+  constructor({ bot, sender, progressUi, pipeline, stateRepo, positionsRepo, signalsRepo, env, subscriptionsRepo, usersRepo, quotaRepo, dedupRepo }) {
     this.bot = bot;
     this.sender = sender;
     this.progressUi = progressUi;
@@ -743,10 +784,107 @@ export class Commands {
     this.positionsRepo = positionsRepo;
     this.signalsRepo = signalsRepo;
     this.env = env;
+    this.subscriptionsRepo = subscriptionsRepo;
+    this.usersRepo = usersRepo;
+    this.quotaRepo = quotaRepo;
+    this.dedupRepo = dedupRepo;
+  }
+
+  async isSubscribed(userId) {
+    const channelId = this.env?.REQUIRED_SUBSCRIBE_CHANNEL_ID;
+    if (!channelId || !userId) return false;
+    try {
+      const member = await this.bot.getChatMember(channelId, userId);
+      const status = String(member?.status || "").toLowerCase();
+      return status === "member" || status === "administrator" || status === "creator";
+    } catch {
+      return false;
+    }
+  }
+
+  async ensureDmAccess(msg) {
+    const type = String(msg?.chat?.type || "").toLowerCase();
+    if (type === "channel") {
+      if (shouldAutoLeave(msg?.chat)) {
+        const text = restrictedText(msg?.chat);
+        try { await this.sender.sendTextUnsafe(msg.chat.id, text); } catch {}
+        try { await this.sender.leaveChat(msg.chat.id); } catch {}
+      }
+      return false;
+    }
+    if (type === "group" || type === "supergroup") {
+      if (shouldAutoLeave(msg?.chat)) {
+        const text = restrictedText(msg?.chat);
+        try { await this.sender.sendTextUnsafe(msg.chat.id, text); } catch {}
+        try { await this.sender.leaveChat(msg.chat.id); } catch {}
+        return false;
+      }
+      return true;
+    }
+    if (!isDmMessage(msg)) return true;
+    const userId = msg?.from?.id;
+    const ok = await this.isSubscribed(userId);
+    if (!ok) {
+      await this.sender.sendText(msg.chat.id, [
+        "Access restricted.",
+        "Please subscribe to the required channel, then tap \"Check subscription\" in /start."
+      ].join("\n"));
+      return false;
+    }
+    try {
+      this.usersRepo?.upsertUser?.(userId, { chatId: String(msg?.chat?.id || "") });
+      await this.usersRepo?.flush?.();
+    } catch {}
+    return true;
   }
 
   bind() {
+    this.bot.onText(/^\/start\b/i, async (msg) => {
+      if (!isDmMessage(msg)) return;
+      const channelId = this.env?.REQUIRED_SUBSCRIBE_CHANNEL_ID;
+      const text = [
+        "CLOUD TREND ALERT",
+        "━━━━━━━━━━━━━━━━━━",
+        "To use this bot in DM, please subscribe to the required channel.",
+        channelId ? `Required Channel ID: ${channelId}` : null,
+        "",
+        "After subscribing, tap the button below to verify."
+      ].filter(Boolean).join("\n");
+
+      await this.sender.sendTextUnsafe(msg.chat.id, text, {
+        reply_markup: {
+          inline_keyboard: [[{ text: "Check subscription", callback_data: "check_sub" }]]
+        }
+      });
+    });
+
+    this.bot.on("callback_query", async (query) => {
+      try {
+        if (String(query?.data || "") !== "check_sub") return;
+        const userId = query?.from?.id;
+        const chatId = query?.message?.chat?.id || userId;
+        const ok = await this.isSubscribed(userId);
+        if (ok) {
+          try {
+            this.usersRepo?.upsertUser?.(userId, {
+              chatId: String(chatId || ""),
+              username: query?.from?.username || "",
+              firstName: query?.from?.first_name || "",
+              lastName: query?.from?.last_name || ""
+            });
+            await this.usersRepo?.flush?.();
+          } catch {}
+          await this.bot.answerCallbackQuery(query.id, { text: "Subscription verified. You can use /scan now.", show_alert: false });
+          await this.sender.sendText(chatId, "Subscription verified. You can use /scan now.");
+        } else {
+          await this.bot.answerCallbackQuery(query.id, { text: "Not subscribed yet. Please subscribe and try again.", show_alert: false });
+          await this.sender.sendText(chatId, "Not subscribed yet. Please subscribe to the required channel and try again.");
+        }
+      } catch {}
+    });
+
     this.bot.onText(/^\/help\b/i, async (msg) => {
+      if (!(await this.ensureDmAccess(msg))) return;
       await this.sender.sendText(
         msg.chat.id,
         [
@@ -769,6 +907,7 @@ export class Commands {
     });
 
     this.bot.onText(/^\/top\b/i, async (msg) => {
+      if (!(await this.ensureDmAccess(msg))) return;
       const dateKey = utcDateKeyNow();
 
       let rows = [];
@@ -782,24 +921,112 @@ export class Commands {
       await this.sender.sendText(msg.chat.id, formatTopCard({ dateKey, rows: list, isVolume: true }));
     });
 
+    this.bot.onText(/^\/whereami\b/i, async (msg) => {
+      if (!(await this.ensureDmAccess(msg))) return;
+      const scopeId = resolveScopeId(msg);
+      await this.sender.sendText(msg.chat.id, [
+        `chat.type: ${msg?.chat?.type}`,
+        `chat.id: ${msg?.chat?.id}`,
+        `from.id: ${msg?.from?.id}`,
+        `scopeId: ${scopeId}`
+      ].join("\n"));
+    });
+
+    this.bot.onText(/^\/(tier|premium)\b/i, async (msg) => {
+      if (!isDmMessage(msg)) return;
+      if (!(await this.ensureDmAccess(msg))) return;
+      const userId = msg?.from?.id;
+      const rec = this.subscriptionsRepo?.get?.(userId) || null;
+      const tier = this.subscriptionsRepo?.getTier?.(userId) || "FREE";
+      const expiresAt = rec?.expiresAt || "N/A";
+      const remainingMs = rec?.expiresAt ? (Date.parse(rec.expiresAt) - Date.now()) : null;
+      const remaining = remainingMs != null ? formatRemainingTime(remainingMs) : "N/A";
+
+      await this.sender.sendText(msg.chat.id, [
+        "CLOUD TREND ALERT",
+        "━━━━━━━━━━━━━━━━━━",
+        `Tier: ${tier}`,
+        `Expires At (UTC): ${expiresAt}`,
+        `Remaining: ${remaining}`
+      ].join("\n"));
+    });
+
+    this.bot.onText(/^\/grant\b(.*)$/i, async (msg, match) => {
+      if (!isDmMessage(msg)) return;
+      if (!(await this.ensureDmAccess(msg))) return;
+      const userId = msg?.from?.id;
+      if (!isAdminUser(userId, this.env)) {
+        await this.sender.sendText(msg.chat.id, "Admin only.");
+        return;
+      }
+      const raw = (match?.[1] || "").trim();
+      const args = raw ? raw.split(/\s+/).filter(Boolean) : [];
+      if (args.length < 2) {
+        await this.sender.sendText(msg.chat.id, "Usage: /grant <userId> <days>");
+        return;
+      }
+      const targetId = args[0];
+      const days = Number(args[1]);
+      if (!targetId || !Number.isFinite(days) || days <= 0) {
+        await this.sender.sendText(msg.chat.id, "Usage: /grant <userId> <days>");
+        return;
+      }
+      const rec = this.subscriptionsRepo?.grant?.(targetId, days);
+      await this.subscriptionsRepo?.flush?.();
+      await this.sender.sendText(msg.chat.id, `Granted PREMIUM to ${targetId} for ${days} day(s).`);
+    });
+
+    this.bot.onText(/^\/revoke\b(.*)$/i, async (msg, match) => {
+      if (!isDmMessage(msg)) return;
+      if (!(await this.ensureDmAccess(msg))) return;
+      const userId = msg?.from?.id;
+      if (!isAdminUser(userId, this.env)) {
+        await this.sender.sendText(msg.chat.id, "Admin only.");
+        return;
+      }
+      const raw = (match?.[1] || "").trim();
+      const args = raw ? raw.split(/\s+/).filter(Boolean) : [];
+      const targetId = args[0];
+      if (!targetId) {
+        await this.sender.sendText(msg.chat.id, "Usage: /revoke <userId>");
+        return;
+      }
+      this.subscriptionsRepo?.revoke?.(targetId);
+      await this.subscriptionsRepo?.flush?.();
+      await this.sender.sendText(msg.chat.id, `Revoked PREMIUM for ${targetId}.`);
+    });
+
 
     this.bot.onText(/^\/status\b/i, async (msg) => {
+      if (!(await this.ensureDmAccess(msg))) return;
       const chatId = msg.chat.id;
       const chatKey = normalizeChatId(chatId);
+      const dm = isDmMessage(msg);
+      const scopeId = resolveScopeId(msg);
       const dateKey = utcDateKeyNow();
       const timeKey = utcTimeNow();
 
-      const groupStats = await readGroupDayStats(chatId, dateKey);
-      const autoSent = groupStats.autoSignalsSent;
-      const scanSignalsSent = groupStats.scanSignalsSent;
-      const scanOk = groupStats.scanRequestsSuccess;
+      let autoSent = 0;
+      let scanSignalsSent = 0;
+      let scanOk = 0;
+      if (dm) {
+        const stats = await this.signalsRepo?.getDayStats?.({ dayKey: dateKey, scopeId });
+        autoSent = Number(stats?.autoSignalsSent || 0);
+        scanSignalsSent = Number(stats?.scanSignalsSent || 0);
+        scanOk = Number(stats?.scanRequestsSuccess || 0);
+      } else {
+        const groupStats = await readGroupDayStats(chatId, dateKey);
+        autoSent = groupStats.autoSignalsSent;
+        scanSignalsSent = groupStats.scanSignalsSent;
+        scanOk = groupStats.scanRequestsSuccess;
+      }
       const totalCreated = autoSent + scanSignalsSent;
 
       const all = await listAllPositions(this.positionsRepo);
-      const scopedAll = (Array.isArray(all) ? all : []).filter((p) => posBelongsToChat(p, chatKey));
+      const scopedAll = (Array.isArray(all) ? all : []).filter((p) => dm ? posBelongsToScope(p, scopeId) : posBelongsToChat(p, chatKey));
       const active = Array.isArray(this.positionsRepo.listActive?.()) ? this.positionsRepo.listActive() : all.filter(isActivePos);
       const activeList = Array.isArray(active) ? active : [];
-      const scopedActive = activeList.filter((p) => posBelongsToChat(p, chatKey));
+      const scopedActive = activeList.filter((p) => dm ? posBelongsToScope(p, scopeId) : posBelongsToChat(p, chatKey));
       const startMs = startOfUtcDayMs(dateKey);
 
       const openFilled = scopedActive.filter((p) => isActivePos(p) && entryHitTs(p) > 0).length;
@@ -850,16 +1077,19 @@ export class Commands {
     });
 
     this.bot.onText(/^\/statusopen\b/i, async (msg) => {
+      if (!(await this.ensureDmAccess(msg))) return;
       const chatId = msg.chat.id;
       const chatKey = normalizeChatId(chatId);
+      const dm = isDmMessage(msg);
+      const scopeId = resolveScopeId(msg);
       const dateKey = utcDateKeyNow();
       const timeKey = utcTimeNow();
 
       const all = await listAllPositions(this.positionsRepo);
-      const scopedAll = (Array.isArray(all) ? all : []).filter((p) => posBelongsToChat(p, chatKey));
+      const scopedAll = (Array.isArray(all) ? all : []).filter((p) => dm ? posBelongsToScope(p, scopeId) : posBelongsToChat(p, chatKey));
       const active = Array.isArray(this.positionsRepo.listActive?.()) ? this.positionsRepo.listActive() : all.filter(isActivePos);
       const activeList = Array.isArray(active) ? active : [];
-      const scopedActive = activeList.filter((p) => posBelongsToChat(p, chatKey));
+      const scopedActive = activeList.filter((p) => dm ? posBelongsToScope(p, scopeId) : posBelongsToChat(p, chatKey));
       const startMs = startOfUtcDayMs(dateKey);
 
       const openFilled = scopedActive.filter((p) => isActivePos(p) && entryHitTs(p) > 0).length;
@@ -893,13 +1123,16 @@ export class Commands {
     });
 
     this.bot.onText(/^\/statusclosed\b/i, async (msg) => {
+      if (!(await this.ensureDmAccess(msg))) return;
       const chatId = msg.chat.id;
       const chatKey = normalizeChatId(chatId);
+      const dm = isDmMessage(msg);
+      const scopeId = resolveScopeId(msg);
       const dateKey = utcDateKeyNow();
 
       const all = await listAllPositions(this.positionsRepo);
-      const scopedAll = (Array.isArray(all) ? all : []).filter((p) => posBelongsToChat(p, chatKey));
-      const lifecycle = await readLifecycleDayStats(this.signalsRepo, dateKey, chatKey);
+      const scopedAll = (Array.isArray(all) ? all : []).filter((p) => dm ? posBelongsToScope(p, scopeId) : posBelongsToChat(p, chatKey));
+      const lifecycle = await readLifecycleDayStats(this.signalsRepo, dateKey, dm ? null : chatKey, dm ? scopeId : null);
       const outcomeById = lifecycle?.outcomeById || null;
       const closedTodayList = scopedAll
         .filter((p) => closedAtTs(p) > 0)
@@ -937,8 +1170,11 @@ export class Commands {
     });
 
     this.bot.onText(/^\/cohort\b(.*)$/i, async (msg, match) => {
+      if (!(await this.ensureDmAccess(msg))) return;
       const chatId = msg.chat.id;
       const chatKey = normalizeChatId(chatId);
+      const dm = isDmMessage(msg);
+      const scopeId = resolveScopeId(msg);
       const raw = (match?.[1] || "").trim();
       const args = raw ? raw.split(/\s+/).filter(Boolean) : [];
       const dateArg = args[0] ? parseDateKeyArg(args[0]) : null;
@@ -950,7 +1186,7 @@ export class Commands {
 
       if (!args.length || String(args[0] || "").toLowerCase() === "active") {
         const all = await listAllPositions(this.positionsRepo);
-        const scopedAll = (Array.isArray(all) ? all : []).filter((p) => posBelongsToChat(p, chatKey));
+        const scopedAll = (Array.isArray(all) ? all : []).filter((p) => dm ? posBelongsToScope(p, scopeId) : posBelongsToChat(p, chatKey));
         const cohortPositions = scopedAll
           .filter((p) => {
             const createdAt = Number(p?.createdAt || 0);
@@ -961,7 +1197,7 @@ export class Commands {
 
         const cohortIds = new Set(cohortPositions.map((p) => p?.id).filter(Boolean));
         const events = await readSignalsEventsRange(this.signalsRepo, range.keys);
-        const scopedEvents = filterEventsForChat(events, chatKey);
+        const scopedEvents = dm ? filterEventsForScopeId(events, scopeId) : filterEventsForChat(events, chatKey);
         const cohortEvents = scopedEvents.filter((ev) => cohortIds.has(ev?.positionId));
 
         const createdStats = createdRangeFromPositions(cohortPositions, range.keys);
@@ -1056,13 +1292,13 @@ export class Commands {
       }
 
       const all = await listAllPositions(this.positionsRepo);
-      const scopedAll = (Array.isArray(all) ? all : []).filter((p) => posBelongsToChat(p, chatKey));
+      const scopedAll = (Array.isArray(all) ? all : []).filter((p) => dm ? posBelongsToScope(p, scopeId) : posBelongsToChat(p, chatKey));
       const cohort = scopedAll
         .filter((p) => sameUtcDay(Number(p?.createdAt || 0), dateArg));
 
       const cohortIds = new Set(cohort.map((p) => p?.id).filter(Boolean));
       const events = await readSignalsEventsRange(this.signalsRepo, range.keys);
-      const scopedEvents = filterEventsForChat(events, chatKey);
+      const scopedEvents = dm ? filterEventsForScopeId(events, scopeId) : filterEventsForChat(events, chatKey);
       const cohortEvents = scopedEvents.filter((ev) => cohortIds.has(ev?.positionId));
       const stateById = buildPositionStateMapFromEvents(cohortEvents);
 
@@ -1167,8 +1403,11 @@ export class Commands {
     });
 
     this.bot.onText(/^\/info\b(.*)$/i, async (msg, match) => {
+      if (!(await this.ensureDmAccess(msg))) return;
       const chatId = msg.chat.id;
       const chatKey = normalizeChatId(chatId);
+      const dm = isDmMessage(msg);
+      const scopeId = resolveScopeId(msg);
       const raw = (match?.[1] || "").trim();
       const args = raw ? raw.split(/\s+/).filter(Boolean) : [];
 
@@ -1197,20 +1436,34 @@ export class Commands {
         return;
       }
 
-      const groupStats = await readGroupDayStats(chatId, dateKey);
-      const autoSent = groupStats.autoSignalsSent;
-      const scanSignalsSent = groupStats.scanSignalsSent;
-      const scanOk = groupStats.scanRequestsSuccess;
-      const totalCreated = autoSent + scanSignalsSent;
+      let autoSent = 0;
+      let scanSignalsSent = 0;
+      let scanOk = 0;
+      let totalCreated = 0;
+      let createdStats = { day: {} };
+      if (dm) {
+        const stats = await this.signalsRepo?.getDayStats?.({ dayKey: dateKey, scopeId });
+        autoSent = Number(stats?.autoSignalsSent || 0);
+        scanSignalsSent = Number(stats?.scanSignalsSent || 0);
+        scanOk = Number(stats?.scanRequestsSuccess || 0);
+        totalCreated = autoSent + scanSignalsSent;
+        createdStats = { day: {} };
+      } else {
+        const groupStats = await readGroupDayStats(chatId, dateKey);
+        autoSent = groupStats.autoSignalsSent;
+        scanSignalsSent = groupStats.scanSignalsSent;
+        scanOk = groupStats.scanRequestsSuccess;
+        totalCreated = autoSent + scanSignalsSent;
 
-      const createdStats = await resolveCreatedStats({
-        dateKey,
-        stateRepo: this.stateRepo,
-        signalsRepo: this.signalsRepo
-      });
+        createdStats = await resolveCreatedStats({
+          dateKey,
+          stateRepo: this.stateRepo,
+          signalsRepo: this.signalsRepo
+        });
+      }
 
       const all = await listAllPositions(this.positionsRepo);
-      const scopedAll = (Array.isArray(all) ? all : []).filter((p) => posBelongsToChat(p, chatKey));
+      const scopedAll = (Array.isArray(all) ? all : []).filter((p) => dm ? posBelongsToScope(p, scopeId) : posBelongsToChat(p, chatKey));
       const progressStats = progressFromPositions(scopedAll, dateKey);
       const outcomeStats = outcomesFromPositions(scopedAll, dateKey);
 
@@ -1248,9 +1501,152 @@ export class Commands {
       );
     });
     this.bot.onText(/^\/scan\b(.*)$/i, async (msg, match) => {
+      const chatType = String(msg?.chat?.type || "").toLowerCase();
+      if (chatType === "channel") {
+        await this.ensureDmAccess(msg);
+        return;
+      }
+      if (!(await this.ensureDmAccess(msg))) return;
+      if (isDmMessage(msg)) {
+        const chatId = msg.chat.id;
+        const userId = msg.from?.id ?? 0;
+        const scopeId = resolveScopeId(msg);
+        const todayKey = utcDateKeyNow();
+        const tier = String(this.subscriptionsRepo?.getTier?.(userId) || "FREE").toUpperCase();
+
+        if (tier === "FREE" && !this.quotaRepo?.canScan?.(userId, tier)) {
+          await this.sender.sendText(chatId, [
+            "Daily scan limit reached (10/10).",
+            "Upgrade to PREMIUM for unlimited scans.",
+            "Contact the admin to upgrade."
+          ].join("\n"));
+          return;
+        }
+
+        try {
+          this.quotaRepo?.incScan?.(userId);
+          await this.quotaRepo?.flush?.();
+        } catch {}
+
+        const limits = { intraday: 2, swing: 1 };
+        let picked = { intraday: [], swing: [] };
+        try {
+          if (tier === "PREMIUM") {
+            picked = await this.pipeline.pickDmScanHybrid({ intradayTfs: ["30m", "1h"], swingTf: "4h", limits });
+          } else {
+            picked = await this.pipeline.pickDmScanNewHarmonic({ intradayTfs: ["30m", "1h"], swingTf: "4h", limits });
+          }
+        } catch {}
+
+        const seen = new Set();
+        let dedupSkipped = 0;
+        const normDir = (d) => {
+          const x = String(d || "").toUpperCase();
+          if (x.startsWith("LONG") || x === "L") return "LONG";
+          if (x.startsWith("SHORT") || x === "S") return "SHORT";
+          return x;
+        };
+        const dedupKey = (sig) => {
+          const sym = String(sig?.symbol || "").toUpperCase();
+          const tf = String(sig?.tf || "").toLowerCase();
+          const dir = normDir(sig?.direction || sig?.side);
+          return `${todayKey}|${userId}|${sym}|${tf}|${dir}`;
+        };
+
+        const filterList = (list, limit) => {
+          const out = [];
+          for (const sig of (Array.isArray(list) ? list : [])) {
+            const key = `${String(sig?.symbol || "").toUpperCase()}|${String(sig?.tf || "").toLowerCase()}|${normDir(sig?.direction || sig?.side)}`;
+            if (!key || seen.has(key)) continue;
+            seen.add(key);
+            const dkey = dedupKey(sig);
+            if (this.dedupRepo?.has?.(dkey)) { dedupSkipped += 1; continue; }
+            out.push(sig);
+            if (out.length >= limit) break;
+          }
+          return out;
+        };
+
+        const intraday = filterList(picked?.intraday || [], limits.intraday);
+        const swing = filterList(picked?.swing || [], limits.swing);
+
+        if (intraday.length < limits.intraday || swing.length < limits.swing) {
+          const reasons = [];
+          if (intraday.length < limits.intraday) reasons.push("Not enough intraday (30m/1h) setups.");
+          if (swing.length < limits.swing) reasons.push("No swing (4h) setups.");
+          if (dedupSkipped > 0) reasons.push("Daily dedup removed repeats.");
+          if (!reasons.length) reasons.push("No qualifying setups found.");
+
+          await this.sender.sendText(chatId, ["No setups found.", "Reasons:", ...reasons.map((r) => `• ${r}`)].join("\n"));
+          try {
+            await this.signalsRepo.logScanNoSignal({
+              chatId,
+              query: { symbol: null, tf: null, raw: (match?.[1] || "").trim() || "" },
+              meta: { scopeId, tier, reason: "DM_SCAN_EMPTY" }
+            });
+          } catch {}
+          return;
+        }
+
+        const allSignals = [...intraday, ...swing];
+        for (const sig of allSignals) {
+          const overlays = buildOverlays(sig);
+          const png = await renderEntryChart(sig, overlays);
+          await this.sender.sendPhoto(chatId, png);
+
+          const entryMsg = await this.sender.sendText(chatId, entryCard(sig));
+
+          const pos = createPositionFromSignal(sig, {
+            source: "SCAN",
+            notifyChatIds: [String(chatId)],
+            telegram: entryMsg?.message_id
+              ? { entryMessageIds: { [String(chatId)]: entryMsg.message_id } }
+              : null
+          });
+
+          pos.chatId = String(chatId);
+          pos.scopeId = scopeId;
+          if (pos.scopeId && !String(pos.id || "").includes(`|${pos.scopeId}`)) {
+            pos.id = `${pos.id}|${pos.scopeId}`;
+          }
+          pos.strategyKey = sig?.strategyKey || "PRO";
+          if (Array.isArray(pos.notifyChatIds) && pos.notifyChatIds.length) {
+            const merged = new Set(pos.notifyChatIds.map(String));
+            merged.add(String(chatId));
+            pos.notifyChatIds = Array.from(merged);
+          } else {
+            pos.notifyChatIds = [String(chatId)];
+          }
+
+          pos.createdAt = pos.createdAt || Date.now();
+          pos.expiresAt = pos.expiresAt || (pos.createdAt + ttlMsForTf(pos.tf));
+          if (!pos.filledAt && !pos.hitTP1 && !pos.hitTP2 && !pos.hitTP3) {
+            pos.status = "PENDING_ENTRY";
+          }
+
+          this.positionsRepo.upsert(pos);
+          await this.positionsRepo.flush();
+
+          await this.signalsRepo.logEntry({
+            source: "SCAN",
+            signal: sig,
+            meta: { scopeId, strategyKey: sig?.strategyKey || "PRO", tier, chatId: String(chatId) }
+          });
+
+          try {
+            this.dedupRepo?.add?.(dedupKey(sig));
+          } catch {}
+        }
+
+        try { await this.dedupRepo?.flush?.(); } catch {}
+        return;
+      }
+
       const chatId = msg.chat.id;
       const chatKey = normalizeChatId(chatId);
+      const scopeId = `g:${chatKey}`;
       const userId = msg.from?.id ?? 0;
+      const uiUserId = isDmMessage(msg) ? userId : undefined;
       const todayKey = utcDateKeyNow();
 
       const raw = (match?.[1] || "").trim();
@@ -1261,7 +1657,7 @@ export class Commands {
         try {
           const list = Array.isArray(this.positionsRepo.listActive?.()) ? this.positionsRepo.listActive() : [];
           const syms = list
-            .filter((p) => p && p.status !== "CLOSED" && p.status !== "EXPIRED")
+            .filter((p) => p && p.status !== "CLOSED" && p.status !== "EXPIRED" && posBelongsToChat(p, chatKey))
             .map((p) => String(p.symbol || "").toUpperCase())
             .filter(Boolean);
           return Array.from(new Set(syms));
@@ -1308,9 +1704,6 @@ export class Commands {
           await this.stateRepo.flush();
         }
       } catch {}
-      try {
-        await incGroupStat(chatId, todayKey, "scanRequestsSuccess", 1);
-      } catch {}
 
 
       let symbolUsed = symbolArg || null;
@@ -1322,11 +1715,12 @@ export class Commands {
       let out = null;
       let secondaryPick = null;
       let intradayPlans = [];
+      let scanRequestCounted = false;
 
 
       // Rotation mode keeps Progress UI (single edited message).
       if (rotationMode) {
-        out = await this.progressUi.run({ chatId, userId }, async () => {
+        out = await this.progressUi.run({ chatId, userId: uiUserId }, async () => {
           const lists = await this.pipeline.scanLists({ excludeSymbols: activeSymbols });
           const swingList = Array.isArray(lists?.swing) ? lists.swing : [];
           const intradayList = Array.isArray(lists?.intraday) ? lists.intraday : [];
@@ -1337,8 +1731,9 @@ export class Commands {
           const primary = swingList[0] || null;
           symbolUsed = primary?.symbol || intradayList[0]?.symbol || null;
 
-          if (primary) return primary;
-          if (intradayList.length) return { ok: true, __intradayOnly: true };
+          if (swingList.length || intradayList.length) {
+            return { intraday: intradayList, swing: swingList };
+          }
           return null;
         });
       } else {
@@ -1461,8 +1856,20 @@ export class Commands {
       if (out.kind !== "OK") return;
 
       let res = out.result;
-      const swingRes = (res && res.ok && !res.__intradayOnly) ? res : null;
-      const swingOk = !!(swingRes && swingRes.ok && (swingRes.score || 0) >= 70 && swingRes.scoreLabel !== "NO SIGNAL");
+      let swingList = null;
+      if (rotationMode && res && (Array.isArray(res.swing) || Array.isArray(res.intraday))) {
+        swingList = Array.isArray(res.swing) ? res.swing : [];
+        const intradayList = Array.isArray(res.intraday) ? res.intraday : [];
+        intradayPlans = intradayList;
+        if (!symbolUsed) symbolUsed = swingList[0]?.symbol || intradayList[0]?.symbol || null;
+        res = swingList[0] || null;
+      }
+      const swingRes = rotationMode
+        ? (Array.isArray(swingList) && swingList.length ? swingList[0] : null)
+        : ((res && res.ok && !res.__intradayOnly) ? res : null);
+      const swingOk = rotationMode
+        ? (Array.isArray(swingList) && swingList.length > 0)
+        : !!(swingRes && swingRes.ok && (swingRes.score || 0) >= 70 && swingRes.scoreLabel !== "NO SIGNAL");
       const hasIntraday = Array.isArray(intradayPlans) && intradayPlans.length > 0;
       const intradayOnly = !!(tfArg && !isSwingTfLocal(tfArg));
       const swingOnly = !!(tfArg && isSwingTfLocal(tfArg));
@@ -1506,7 +1913,7 @@ export class Commands {
             if (!sym || sentSymbols.has(sym)) continue;
             sentSymbols.add(sym);
 
-            const cooldownKey = `${sym}:intraday`;
+            const cooldownKey = `${chatKey}:${sym}:intraday`;
             const canSend = typeof this.stateRepo?.canSendSymbol === "function"
               ? this.stateRepo.canSendSymbol(cooldownKey, INTRADAY_COOLDOWN_MINUTES)
               : true;
@@ -1522,6 +1929,10 @@ export class Commands {
             if (entryMsg) {
               intradaySent++;
               try { await incGroupStat(chatId, todayKey, "scanSignalsSent", 1); } catch {}
+              if (!scanRequestCounted) {
+                scanRequestCounted = true;
+                try { await incGroupStat(chatId, todayKey, "scanRequestsSuccess", 1); } catch {}
+              }
             }
             try { this.stateRepo?.markSent?.(cooldownKey); } catch {}
 
@@ -1536,6 +1947,10 @@ export class Commands {
               });
 
               pos.chatId = chatKey;
+              pos.scopeId = scopeId;
+              if (pos.scopeId && !String(pos.id || "").includes(`|${pos.scopeId}`)) {
+                pos.id = `${pos.id}|${pos.scopeId}`;
+              }
               if (Array.isArray(pos.notifyChatIds) && pos.notifyChatIds.length) {
                 const merged = new Set(pos.notifyChatIds.map(String));
                 merged.add(chatKey);
@@ -1675,18 +2090,16 @@ export class Commands {
       const findActiveDup = (sig) => {
         if (!sig) return null;
         try {
-          return (typeof this.positionsRepo.findActiveBySymbolTf === "function"
-            ? this.positionsRepo.findActiveBySymbolTf(sig.symbol, sig.tf)
-            : null) ||
-            (Array.isArray(this.positionsRepo.listActive?.())
-              ? this.positionsRepo.listActive().find((p) =>
-                  p &&
-                  p.status !== "CLOSED" &&
-                  p.status !== "EXPIRED" &&
-                  String(p.symbol || "").toUpperCase() === String(sig.symbol || "").toUpperCase() &&
-                  String(p.tf || "").toLowerCase() === String(sig.tf || "").toLowerCase()
-                )
-              : null);
+          return (Array.isArray(this.positionsRepo.listActive?.())
+            ? this.positionsRepo.listActive().find((p) =>
+                p &&
+                p.status !== "CLOSED" &&
+                p.status !== "EXPIRED" &&
+                posBelongsToChat(p, chatKey) &&
+                String(p.symbol || "").toUpperCase() === String(sig.symbol || "").toUpperCase() &&
+                String(p.tf || "").toLowerCase() === String(sig.tf || "").toLowerCase()
+              )
+            : null);
         } catch {
           return null;
         }
@@ -1739,7 +2152,7 @@ export class Commands {
       // Guardrails + confluence shaping (LOCK)
       let onlyOneCard = applyGuardrails();
 
-      const swingCooldownKey = `${String(res?.symbol || "").toUpperCase()}:swing`;
+      const swingCooldownKey = `${chatKey}:${String(res?.symbol || "").toUpperCase()}:swing`;
       const swingCooldownOk = typeof this.stateRepo?.canSendSymbol === "function"
         ? this.stateRepo.canSendSymbol(swingCooldownKey, this.env.COOLDOWN_MINUTES)
         : true;
@@ -1866,13 +2279,16 @@ if (primaryDuplicatePos) {
         try {
           await incGroupStat(chatId, todayKey, "scanSignalsSent", 1);
         } catch {}
+        if (!scanRequestCounted) {
+          scanRequestCounted = true;
+          try { await incGroupStat(chatId, todayKey, "scanRequestsSuccess", 1); } catch {}
+        }
       }
 
       // counters
       try {
         if (typeof this.stateRepo.bumpScanSignalsSent === "function") this.stateRepo.bumpScanSignalsSent(res.tf);
         else this.stateRepo.bumpScan(res.tf);
-        if (typeof this.stateRepo.markSentPairTf === "function") this.stateRepo.markSentPairTf(res.symbol, res.tf);
         if (typeof this.stateRepo.markSent === "function") this.stateRepo.markSent(swingCooldownKey);
         await this.stateRepo.flush();
       } catch {}
@@ -1893,6 +2309,10 @@ if (primaryDuplicatePos) {
       });
 
       pos.chatId = chatKey;
+      pos.scopeId = scopeId;
+      if (pos.scopeId && !String(pos.id || "").includes(`|${pos.scopeId}`)) {
+        pos.id = `${pos.id}|${pos.scopeId}`;
+      }
       if (Array.isArray(pos.notifyChatIds) && pos.notifyChatIds.length) {
         const merged = new Set(pos.notifyChatIds.map(String));
         merged.add(chatKey);
@@ -1917,19 +2337,7 @@ if (primaryDuplicatePos) {
       if (secondaryPick && secondaryPick.ok && (!onlyOneCard || !primarySent)) {
         // Prevent duplicate active signals (same Pair + Timeframe)
         try {
-          const existing =
-            (typeof this.positionsRepo.findActiveBySymbolTf === "function"
-              ? this.positionsRepo.findActiveBySymbolTf(secondaryPick.symbol, secondaryPick.tf)
-              : null) ||
-            (Array.isArray(this.positionsRepo.listActive?.())
-              ? this.positionsRepo.listActive().find((p) =>
-                  p &&
-                  p.status !== "CLOSED" &&
-                  p.status !== "EXPIRED" &&
-                  String(p.symbol || "").toUpperCase() === String(secondaryPick.symbol || "").toUpperCase() &&
-                  String(p.tf || "").toLowerCase() === String(secondaryPick.tf || "").toLowerCase()
-                )
-              : null);
+          const existing = findActiveDup(secondaryPick);
 
           if (existing) {
             await this.signalsRepo.logScanThrottled({
@@ -1949,13 +2357,16 @@ if (primaryDuplicatePos) {
               try {
                 await incGroupStat(chatId, todayKey, "scanSignalsSent", 1);
               } catch {}
+              if (!scanRequestCounted) {
+                scanRequestCounted = true;
+                try { await incGroupStat(chatId, todayKey, "scanRequestsSuccess", 1); } catch {}
+              }
             }
 
             // counters
             try {
               if (typeof this.stateRepo.bumpScanSignalsSent === "function") this.stateRepo.bumpScanSignalsSent(secondaryPick.tf);
               else this.stateRepo.bumpScan(secondaryPick.tf);
-              if (typeof this.stateRepo.markSentPairTf === "function") this.stateRepo.markSentPairTf(secondaryPick.symbol, secondaryPick.tf);
               await this.stateRepo.flush();
             } catch {}
 
@@ -1976,6 +2387,10 @@ if (primaryDuplicatePos) {
             });
 
             pos2.chatId = chatKey;
+            pos2.scopeId = scopeId;
+            if (pos2.scopeId && !String(pos2.id || "").includes(`|${pos2.scopeId}`)) {
+              pos2.id = `${pos2.id}|${pos2.scopeId}`;
+            }
             if (Array.isArray(pos2.notifyChatIds) && pos2.notifyChatIds.length) {
               const merged = new Set(pos2.notifyChatIds.map(String));
               merged.add(chatKey);

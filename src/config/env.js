@@ -1,14 +1,22 @@
+function stripInlineComment(v) {
+  if (v === undefined || v === null) return v;
+  return String(v).replace(/\s+#.*$/, "").trim();
+}
+
 function num(v, d) {
-  const n = Number(v);
+  const n = Number(stripInlineComment(v));
   return Number.isFinite(n) ? n : d;
 }
 function bool(v, d) {
   if (v === undefined || v === null || v === "") return d;
-  return String(v).toLowerCase() === "true" || String(v) === "1";
+  const raw = stripInlineComment(v);
+  return String(raw).toLowerCase() === "true" || String(raw) === "1";
 }
 function list(v) {
   if (!v) return [];
-  return String(v).split(",").map((x) => x.trim()).filter(Boolean);
+  const raw = stripInlineComment(v);
+  if (!raw) return [];
+  return String(raw).split(",").map((x) => x.trim()).filter(Boolean);
 }
 
 function listNum(v) {
@@ -16,13 +24,16 @@ function listNum(v) {
 }
 
 export const env = {
-  TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN || "",
+  TELEGRAM_BOT_TOKEN: stripInlineComment(process.env.TELEGRAM_BOT_TOKEN) || "",
   ALLOWED_GROUP_IDS: list(process.env.ALLOWED_GROUP_IDS).map(String),
-  TEST_SIGNALS_CHAT_ID: process.env.TEST_SIGNALS_CHAT_ID ? String(process.env.TEST_SIGNALS_CHAT_ID) : "",
-  TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID ? String(process.env.TELEGRAM_CHAT_ID) : "",
+  ALLOWED_CHANNEL_IDS: list(process.env.ALLOWED_CHANNEL_IDS).map(String),
+  REQUIRED_SUBSCRIBE_CHANNEL_ID: stripInlineComment(process.env.REQUIRED_SUBSCRIBE_CHANNEL_ID) || "",
+  ADMIN_USER_IDS: list(process.env.ADMIN_USER_IDS).map(String),
+  TEST_SIGNALS_CHAT_ID: stripInlineComment(process.env.TEST_SIGNALS_CHAT_ID) ? String(stripInlineComment(process.env.TEST_SIGNALS_CHAT_ID)) : "",
+  TELEGRAM_CHAT_ID: stripInlineComment(process.env.TELEGRAM_CHAT_ID) ? String(stripInlineComment(process.env.TELEGRAM_CHAT_ID)) : "",
 
-  BINANCE_FUTURES_REST: process.env.BINANCE_FUTURES_REST || "https://fapi.binance.com",
-  BINANCE_FUTURES_WS: process.env.BINANCE_FUTURES_WS || "wss://fstream.binance.com/stream",
+  BINANCE_FUTURES_REST: stripInlineComment(process.env.BINANCE_FUTURES_REST) || "https://fapi.binance.com",
+  BINANCE_FUTURES_WS: stripInlineComment(process.env.BINANCE_FUTURES_WS) || "wss://fstream.binance.com/stream",
 
   REST_TIMEOUT_MS: num(process.env.REST_TIMEOUT_MS, 8000),
   REST_RETRY_MAX: num(process.env.REST_RETRY_MAX, 2),
@@ -32,7 +43,7 @@ export const env = {
   WS_BACKOFF_BASE_MS: num(process.env.WS_BACKOFF_BASE_MS, 500),
   WS_BACKOFF_MAX_MS: num(process.env.WS_BACKOFF_MAX_MS, 30000),
 
-  VOLUME_MARKET: process.env.VOLUME_MARKET || "USDT",
+  VOLUME_MARKET: stripInlineComment(process.env.VOLUME_MARKET) || "USDT",
   USE_TOP_VOLUME: bool(process.env.USE_TOP_VOLUME, true),
   TOP_VOLUME_N: num(process.env.TOP_VOLUME_N, 50),
 
@@ -50,11 +61,11 @@ export const env = {
   SECONDARY_MIN_SCORE: num(process.env.SECONDARY_MIN_SCORE, 80),
 
   // Strategy switch (optional). Empty = legacy scoring-only mode.
-  STRATEGY: (process.env.STRATEGY || "").trim(),
+  STRATEGY: (stripInlineComment(process.env.STRATEGY) || "").trim(),
 
   // Optional: override trend timeframe used by CTA gate (e.g. "1h" or "4h").
   // If empty, CTA will auto-map based on entry TF (15m->1h, 30m/1h/4h->4h).
-  TREND_TF: (process.env.TREND_TF || "").toLowerCase(),
+  TREND_TF: (stripInlineComment(process.env.TREND_TF) || "").toLowerCase(),
 
   // Optional: auto-scan timeframes override (empty = use existing behaviour)
   AUTO_TIMEFRAMES: list(process.env.AUTO_TIMEFRAMES || "").map((x) => x.toLowerCase()),
@@ -93,17 +104,17 @@ export const env = {
   UNIVERSE_REFRESH_HOURS: num(process.env.UNIVERSE_REFRESH_HOURS, 6),
   PRICE_MONITOR_INTERVAL_SEC: num(process.env.PRICE_MONITOR_INTERVAL_SEC, 10),
   DAILY_RECAP: false,
-  DAILY_RECAP_UTC: process.env.DAILY_RECAP_UTC || "00:05",
+  DAILY_RECAP_UTC: stripInlineComment(process.env.DAILY_RECAP_UTC) || "00:05",
 
   PORT: num(process.env.PORT, 3000),
   DISABLE_WEBHOOKS: bool(process.env.DISABLE_WEBHOOKS, true),
-  LOG_LEVEL: process.env.LOG_LEVEL || "info",
+  LOG_LEVEL: stripInlineComment(process.env.LOG_LEVEL) || "info",
 
   CHART_RENDERER_DEBUG: bool(process.env.CHART_RENDERER_DEBUG, false),
 
   // Ichimoku HTF Compass (LOCKED)
   ICHIMOKU_ENABLED: bool(process.env.ICHIMOKU_ENABLED, false),
-  ICHIMOKU_TF: (process.env.ICHIMOKU_TF || "4h").toLowerCase(),
+  ICHIMOKU_TF: (stripInlineComment(process.env.ICHIMOKU_TF) || "4h").toLowerCase(),
   ICHIMOKU_SETTINGS: listNum(process.env.ICHIMOKU_SETTINGS || "9,26,52,26"),
 
 
@@ -123,10 +134,15 @@ export const env = {
 
   // Setup -> Trigger confirmation (optional)
   TRIGGER_ENABLED: bool(process.env.TRIGGER_ENABLED, true),
-  TRIGGER_MODE: (process.env.TRIGGER_MODE || "EMA21_RSI_TURN").trim(),
+  TRIGGER_MODE: (stripInlineComment(process.env.TRIGGER_MODE) || "EMA21_RSI_TURN").trim(),
 
   // Monitor entry confirmation (optional)
-  ENTRY_CONFIRM_MODE: (process.env.ENTRY_CONFIRM_MODE || "MID_CROSS").trim(),
+  ENTRY_CONFIRM_MODE: (stripInlineComment(process.env.ENTRY_CONFIRM_MODE) || "MID_CROSS").trim(),
   ENTRY_CONFIRM_DWELL_MS: num(process.env.ENTRY_CONFIRM_DWELL_MS, 15000),
-  ENTRY_CONFIRM_MAX_WAIT_MS: num(process.env.ENTRY_CONFIRM_MAX_WAIT_MS, 0)
+  ENTRY_CONFIRM_MAX_WAIT_MS: num(process.env.ENTRY_CONFIRM_MAX_WAIT_MS, 0),
+
+  DM_FREE_SCAN_LIMIT: num(process.env.DM_FREE_SCAN_LIMIT, 10),
+  DM_FREE_AUTO_LIMIT: num(process.env.DM_FREE_AUTO_LIMIT, 3),
+  DM_PREMIUM_AUTO_LIMIT: num(process.env.DM_PREMIUM_AUTO_LIMIT, 5),
+  CHANNEL_BROADCAST_ENABLED: bool(process.env.CHANNEL_BROADCAST_ENABLED, true)
 };

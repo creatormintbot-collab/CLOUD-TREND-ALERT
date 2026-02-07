@@ -1,14 +1,18 @@
 export class Sender {
-  constructor({ bot, allowedGroupIds = [] } = {}) {
+  constructor({ bot, allowedGroupIds = [], allowedChannelIds = [], allowPrivate = true } = {}) {
     this.bot = bot;
-    this.allowed = new Set((allowedGroupIds || []).map(String));
+    this.allowedGroups = new Set((allowedGroupIds || []).map(String));
+    this.allowedChannels = new Set((allowedChannelIds || []).map(String));
+    this.allowPrivate = allowPrivate !== false;
   }
 
   _isAllowed(chatId) {
     const id = String(chatId);
-    // if allowed list empty -> allow all (dev mode)
-    if (this.allowed.size === 0) return true;
-    return this.allowed.has(id);
+    const num = Number(chatId);
+    if (this.allowPrivate && Number.isFinite(num) && num > 0) return true;
+    if (this.allowedGroups.has(id)) return true;
+    if (this.allowedChannels.has(id)) return true;
+    return false;
   }
 
   // Ignore hard "no access" telegram errors so one dead chat doesn't break the whole AUTO run.
@@ -49,6 +53,16 @@ export class Sender {
     return this._safeTelegramCall(() =>
       this.bot.sendMessage(chatId, text, { disable_web_page_preview: true })
     );
+  }
+
+  async sendTextUnsafe(chatId, text, options = {}) {
+    return this._safeTelegramCall(() =>
+      this.bot.sendMessage(chatId, text, { disable_web_page_preview: true, ...options })
+    );
+  }
+
+  async leaveChat(chatId) {
+    return this._safeTelegramCall(() => this.bot.leaveChat(chatId));
   }
 
   // Reply helper used by monitor/lifecycle flows.

@@ -1,6 +1,7 @@
 import https from "https";
 import TelegramBot from "node-telegram-bot-api";
 import { logger } from "../logger/logger.js";
+import { shouldAutoLeave, restrictedText } from "./accessPolicy.js";
 
 const agent = new https.Agent({ keepAlive: true, maxSockets: 50 });
 
@@ -39,6 +40,7 @@ export function startTelegram(token) {
   // Quick connectivity + token sanity check (non-fatal)
   bot.getMe()
     .then((me) => {
+      try { bot.me = me; } catch {}
       logger.info({ id: me?.id, username: me?.username }, "[telegram] getMe ok");
     })
     .catch((err) => {
@@ -120,4 +122,58 @@ export function startTelegram(token) {
   });
 
   return bot;
+}
+
+export function attachAutoLeaveHandlers(bot, { sender } = {}) {
+  if (!bot) return;
+
+  const safeSend = async (chatId, text) => {
+    if (!chatId || !text) return;
+    if (sender?.sendTextUnsafe) return sender.sendTextUnsafe(chatId, text);
+    try {
+      return await bot.sendMessage(chatId, text, { disable_web_page_preview: true });
+    } catch {}
+    return null;
+  };
+
+  const safeLeave = async (chatId) => {
+    if (!chatId) return;
+    if (sender?.leaveChat) return sender.leaveChat(chatId);
+    try {
+      await bot.leaveChat(chatId);
+    } catch {}
+  };
+
+  const enforce = async (chat) => {
+    if (!chat || !chat.id) return;
+    if (!shouldAutoLeave(chat)) return;
+    const text = restrictedText(chat);
+    await safeSend(chat.id, text);
+    await safeLeave(chat.id);
+  };
+
+  bot.on("my_chat_member", (update) => {
+    try {
+      const chat = update?.chat;
+      const status = String(update?.new_chat_member?.status || "").toLowerCase();
+      if (status === "member" || status === "administrator" || status === "creator") {
+        enforce(chat);
+      }
+    } catch (err) {
+      logger.warn({ err }, "[telegram] auto_leave my_chat_member failed");
+    }
+  });
+
+  bot.on("message", (msg) => {
+    try {
+      const members = msg?.new_chat_members;
+      if (!Array.isArray(members) || !members.length) return;
+      const botId = bot?.me?.id;
+      if (!botId) return;
+      const added = members.some((m) => m?.id === botId);
+      if (added) enforce(msg?.chat);
+    } catch (err) {
+      logger.warn({ err }, "[telegram] auto_leave message failed");
+    }
+  });
 }

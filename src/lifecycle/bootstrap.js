@@ -15,16 +15,21 @@ import { StateRepo } from "../storage/stateRepo.js";
 import { PositionsRepo } from "../storage/positionsRepo.js";
 import { RotationRepo } from "../storage/rotationRepo.js";
 import { SignalsRepo } from "../storage/signalsRepo.js";
+import { SubscriptionsRepo } from "../storage/subscriptionsRepo.js";
+import { UsersRepo } from "../storage/usersRepo.js";
+import { QuotaRepo } from "../storage/quotaRepo.js";
+import { DedupRepo } from "../storage/dedupRepo.js";
 import { KlinesRepo } from "../storage/klinesRepo.js";
 import { inc as incGroupStat } from "../storage/groupStatsRepo.js";
 
 import { Ranker } from "../selection/ranker.js";
 import { Pipeline } from "../selection/pipeline.js";
 
-import { startTelegram } from "../bot/telegram.js";
+import { startTelegram, attachAutoLeaveHandlers } from "../bot/telegram.js";
 import { Sender } from "../bot/sender.js";
 import { ProgressUi } from "../bot/progressUi.js";
 import { Commands } from "../bot/commands.js";
+import { configureAccessPolicy } from "../bot/accessPolicy.js";
 
 import { startAutoScanJob } from "../jobs/autoScanJob.js";
 import { startMonitorJob } from "../jobs/monitorJob.js";
@@ -36,7 +41,7 @@ import { Monitor } from "../positions/monitor.js";
 import { createPositionFromSignal } from "../positions/positionModel.js";
 import { isWinOutcome, isDirectSL } from "../positions/outcomes.js";
 
-import { entryCard } from "../bot/cards/entryCard.js";
+import { entryCard, entryHitCard } from "../bot/cards/entryCard.js";
 import { tp1Card } from "../bot/cards/tp1Card.js";
 import { tp2Card } from "../bot/cards/tp2Card.js";
 import { tp3Card } from "../bot/cards/tp3Card.js";
@@ -55,9 +60,21 @@ export async function bootstrap() {
   const positionsRepo = new PositionsRepo();
   const rotationRepo = new RotationRepo({ cooldownMinutes: env.COOLDOWN_MINUTES });
   const signalsRepo = new SignalsRepo();
+  const subscriptionsRepo = new SubscriptionsRepo();
+  const usersRepo = new UsersRepo();
+  const quotaRepo = new QuotaRepo();
+  const dedupRepo = new DedupRepo();
   const klinesRepo = new KlinesRepo();
 
-  await Promise.all([stateRepo.load(), positionsRepo.load(), rotationRepo.load()]);
+  await Promise.all([
+    stateRepo.load(),
+    positionsRepo.load(),
+    rotationRepo.load(),
+    subscriptionsRepo.load(),
+    usersRepo.load(),
+    quotaRepo.load(),
+    dedupRepo.load()
+  ]);
 
   const rest = new RestClient({
     baseUrl: env.BINANCE_FUTURES_REST,
@@ -125,14 +142,36 @@ export async function bootstrap() {
   const pipeline = new Pipeline({ universe, klines, ranker, thresholds, stateRepo, rotationRepo, env });
 
   const bot = startTelegram(env.TELEGRAM_BOT_TOKEN);
-  const sender = new Sender({ bot, allowedGroupIds: env.ALLOWED_GROUP_IDS });
+  const sender = new Sender({ bot, allowedGroupIds: env.ALLOWED_GROUP_IDS, allowedChannelIds: env.ALLOWED_CHANNEL_IDS, allowPrivate: true });
+  configureAccessPolicy({ allowedGroups: env.ALLOWED_GROUP_IDS, allowedChannels: env.ALLOWED_CHANNEL_IDS });
+  attachAutoLeaveHandlers(bot, { sender });
   const progressUi = new ProgressUi({ sender });
 
-  const notifyChatIds = Array.from(
-    new Set([env.TELEGRAM_CHAT_ID, env.TEST_SIGNALS_CHAT_ID, ...env.ALLOWED_GROUP_IDS].filter(Boolean).map(String))
+  const allowedGroupSet = new Set((env.ALLOWED_GROUP_IDS || []).map(String));
+  const allowedChannelSet = new Set((env.ALLOWED_CHANNEL_IDS || []).map(String));
+  const defaultGroupChatIds = Array.from(
+    new Set(
+      [env.TELEGRAM_CHAT_ID, env.TEST_SIGNALS_CHAT_ID]
+        .filter(Boolean)
+        .map(String)
+        .filter((id) => allowedGroupSet.has(id) && !allowedChannelSet.has(id))
+    )
   );
 
-  const commands = new Commands({ bot, sender, progressUi, pipeline, stateRepo, positionsRepo, signalsRepo, env });
+  const commands = new Commands({
+    bot,
+    sender,
+    progressUi,
+    pipeline,
+    stateRepo,
+    positionsRepo,
+    signalsRepo,
+    env,
+    subscriptionsRepo,
+    usersRepo,
+    quotaRepo,
+    dedupRepo
+  });
   commands.bind();
 
   const server = startHealthServer({
@@ -151,11 +190,15 @@ export async function bootstrap() {
     stateRepo,
     signalsRepo,
     sender,
-    cards: { tp1Card, tp2Card, tp3Card, slCard }
+    cards: { entryHitCard, tp1Card, tp2Card, tp3Card, slCard }
   });
+
+  const dmSubCache = new Map();
+  const DM_SUB_CACHE_MS = 6 * 60 * 60 * 1000;
 
   const runAuto = async () => {
     const todayKey = utcDateKey();
+    try {
 
     let autoCreatedToday = 0;
     let scanCreatedToday = 0;
@@ -175,10 +218,10 @@ export async function bootstrap() {
       logger.warn("[AUTO_SCAN] quota_count_failed", { err });
     }
 
-    if (!notifyChatIds.length) {
+    if (!defaultGroupChatIds.length) {
       logger.warn("[AUTO_SCAN] skip_no_notify_chat", {
         reason: "sender_chat_not_configured",
-        notifyChatIdsCount: notifyChatIds.length
+        notifyChatIdsCount: defaultGroupChatIds.length
       });
       return;
     }
@@ -334,7 +377,7 @@ export async function bootstrap() {
 
       const entryMessageIds = {};
 
-      for (const chatId of notifyChatIds) {
+      for (const chatId of defaultGroupChatIds) {
         await sender.sendPhoto(chatId, png);
         const msg = await sender.sendText(chatId, entryCard(sig));
         if (msg?.message_id) entryMessageIds[String(chatId)] = msg.message_id;
@@ -345,15 +388,22 @@ export async function bootstrap() {
         }
       }
 
-      const pos = createPositionFromSignal(sig, {
-        source: "AUTO",
-        notifyChatIds,
-        telegram: Object.keys(entryMessageIds).length ? { entryMessageIds } : null
-      });
-      positionsRepo.upsert(pos);
+      for (const groupChatId of defaultGroupChatIds) {
+        const gid = String(groupChatId);
+        const entryId = entryMessageIds[gid];
+        const pos = createPositionFromSignal(sig, {
+          source: "AUTO",
+          notifyChatIds: [gid],
+          telegram: entryId ? { entryMessageIds: { [gid]: entryId } } : null
+        });
+        pos.chatId = gid;
+        pos.scopeId = `g:${gid}`;
+        pos.id = `${pos.id}|${pos.scopeId}`;
+        positionsRepo.upsert(pos);
+      }
 
       stateRepo.bumpAuto(sig.tf, sig.score, sig.macro.BTC_STATE);
-      await signalsRepo.logEntry({ source: "AUTO", signal: sig, meta: { publishedTo: notifyChatIds } });
+      await signalsRepo.logEntry({ source: "AUTO", signal: sig, meta: { publishedTo: defaultGroupChatIds } });
     }
 
     await Promise.all([positionsRepo.flush(), stateRepo.flush(), signalsRepo.flush()]);
@@ -367,11 +417,173 @@ export async function bootstrap() {
         maxPerDay: env.MAX_SIGNALS_PER_DAY
       });
     }
+    } finally {
+      const normDir = (d) => {
+        const x = String(d || "").toUpperCase();
+        if (x.startsWith("LONG") || x === "L") return "LONG";
+        if (x.startsWith("SHORT") || x === "S") return "SHORT";
+        return x;
+      };
+
+      // CHANNEL broadcast AUTO (entry + lifecycle)
+      try {
+        if (env.CHANNEL_BROADCAST_ENABLED && Array.isArray(env.ALLOWED_CHANNEL_IDS) && env.ALLOWED_CHANNEL_IDS.length) {
+          for (const channelIdRaw of env.ALLOWED_CHANNEL_IDS) {
+            const channelId = String(channelIdRaw || "").trim();
+            if (!channelId) continue;
+
+            let picks = [];
+            try {
+              picks = await pipeline.pickAutoChannelHybrid({ intradayTfs: ["30m", "1h"], swingTf: "4h", limit: 2 });
+            } catch {}
+
+            for (const sig of (Array.isArray(picks) ? picks : [])) {
+              const sym = String(sig?.symbol || "").toUpperCase();
+              const tf = String(sig?.tf || "").toLowerCase();
+              const dir = normDir(sig?.direction || sig?.side);
+              const dkey = `${todayKey}|${channelId}|${sym}|${tf}|${dir}`;
+              if (dedupRepo?.has?.(dkey)) continue;
+
+              const overlays = buildOverlays(sig);
+              const png = await renderEntryChart(sig, overlays);
+              await sender.sendPhoto(channelId, png);
+              const entryMsg = await sender.sendText(channelId, entryCard(sig));
+
+              const pos = createPositionFromSignal(sig, {
+                source: "AUTO",
+                notifyChatIds: [String(channelId)],
+                telegram: entryMsg?.message_id
+                  ? { entryMessageIds: { [String(channelId)]: entryMsg.message_id } }
+                  : null
+              });
+              pos.chatId = String(channelId);
+              pos.scopeId = `c:${channelId}`;
+              if (pos.scopeId && !String(pos.id || "").includes(`|${pos.scopeId}`)) {
+                pos.id = `${pos.id}|${pos.scopeId}`;
+              }
+              pos.strategyKey = sig?.strategyKey || "PRO";
+              pos.notifyChatIds = [String(channelId)];
+              if (entryMsg?.message_id) {
+                if (!pos.telegram || typeof pos.telegram !== "object") pos.telegram = {};
+                if (!pos.telegram.entryMessageIds || typeof pos.telegram.entryMessageIds !== "object") {
+                  pos.telegram.entryMessageIds = {};
+                }
+                pos.telegram.entryMessageIds[String(channelId)] = entryMsg.message_id;
+              }
+              positionsRepo.upsert(pos);
+
+              await signalsRepo.logEntry({
+                source: "AUTO",
+                signal: sig,
+                meta: { scopeId: `c:${channelId}`, targetType: "CHANNEL", strategyKey: sig?.strategyKey || "PRO", publishedTo: [String(channelId)] }
+              });
+
+              dedupRepo?.add?.(dkey);
+            }
+          }
+          await Promise.all([signalsRepo.flush(), dedupRepo.flush(), positionsRepo.flush()]);
+        }
+      } catch (err) {
+        logger.warn({ err }, "[AUTO_SCAN] channel_auto_failed");
+      }
+
+      // DM AUTO (entry + monitoring)
+      try {
+        const userIds = (typeof usersRepo?.listUserIds === "function") ? usersRepo.listUserIds() : [];
+        const channelId = env.REQUIRED_SUBSCRIBE_CHANNEL_ID;
+
+        const isSubscribed = async (userId) => {
+          if (!channelId) return false;
+          const key = String(userId || "");
+          const now = Date.now();
+          const cached = dmSubCache.get(key);
+          if (cached && (now - cached.checkedAt) < DM_SUB_CACHE_MS) return cached.ok;
+
+          let ok = false;
+          try {
+            const member = await bot.getChatMember(channelId, userId);
+            const status = String(member?.status || "").toLowerCase();
+            ok = status === "member" || status === "administrator" || status === "creator";
+          } catch {}
+          dmSubCache.set(key, { ok, checkedAt: now });
+          return ok;
+        };
+
+        for (const uidRaw of userIds) {
+          const uid = String(uidRaw || "").trim();
+          const userId = Number(uid);
+          if (!uid || !Number.isFinite(userId)) continue;
+
+          const ok = await isSubscribed(userId);
+          if (!ok) continue;
+
+          const tier = String(subscriptionsRepo?.getTier?.(userId) || "FREE").toUpperCase();
+          if (!quotaRepo?.canAuto?.(userId, tier)) continue;
+
+          let picks = [];
+          try {
+            picks = await pipeline.pickAutoDm({ tier, intradayTfs: ["30m", "1h"], swingTf: "4h", limit: 2 });
+          } catch {}
+
+          for (const sig of (Array.isArray(picks) ? picks : [])) {
+            if (!quotaRepo?.canAuto?.(userId, tier)) break;
+
+            const sym = String(sig?.symbol || "").toUpperCase();
+            const tf = String(sig?.tf || "").toLowerCase();
+            const dir = normDir(sig?.direction || sig?.side);
+            const dkey = `${todayKey}|${uid}|${sym}|${tf}|${dir}`;
+            if (dedupRepo?.has?.(dkey)) continue;
+
+            const overlays = buildOverlays(sig);
+            const png = await renderEntryChart(sig, overlays);
+            await sender.sendPhoto(uid, png);
+            const entryMsg = await sender.sendText(uid, entryCard(sig));
+
+            const pos = createPositionFromSignal(sig, {
+              source: "AUTO",
+              notifyChatIds: [String(uid)],
+              telegram: entryMsg?.message_id
+                ? { entryMessageIds: { [String(uid)]: entryMsg.message_id } }
+                : null
+            });
+
+            pos.chatId = String(uid);
+            pos.scopeId = `u:${uid}`;
+            if (pos.scopeId && !String(pos.id || "").includes(`|${pos.scopeId}`)) {
+              pos.id = `${pos.id}|${pos.scopeId}`;
+            }
+            pos.strategyKey = sig?.strategyKey || "PRO";
+            if (Array.isArray(pos.notifyChatIds) && pos.notifyChatIds.length) {
+              const merged = new Set(pos.notifyChatIds.map(String));
+              merged.add(String(uid));
+              pos.notifyChatIds = Array.from(merged);
+            } else {
+              pos.notifyChatIds = [String(uid)];
+            }
+
+            positionsRepo.upsert(pos);
+
+            await signalsRepo.logEntry({
+              source: "AUTO",
+              signal: sig,
+              meta: { scopeId: `u:${uid}`, targetType: "DM", tier, strategyKey: sig?.strategyKey || "PRO", publishedTo: [String(uid)] }
+            });
+
+            dedupRepo?.add?.(dkey);
+            quotaRepo?.incAuto?.(userId);
+          }
+        }
+
+        await Promise.all([positionsRepo.flush(), signalsRepo.flush(), quotaRepo.flush(), dedupRepo.flush()]);
+      } catch (err) {
+        logger.warn({ err }, "[AUTO_SCAN] dm_auto_failed");
+      }
+    }
   };
 
 
   const runMonitor = async () => {
-    await monitor.tick(notifyChatIds);
+    await monitor.tick();
   };
 
   const runRecap = async (yesterdayKey) => {
@@ -432,7 +644,7 @@ export async function bootstrap() {
       resultsByPlaybook
     });
 
-    for (const chatId of notifyChatIds) await sender.sendText(chatId, text);
+    for (const chatId of defaultGroupChatIds) await sender.sendText(chatId, text);
 
     stateRepo.setRecapSent(yesterdayKey);
     await stateRepo.flush();
@@ -517,7 +729,11 @@ export async function bootstrap() {
         stateRepo.flush(),
         positionsRepo.flush(),
         rotationRepo.flush(),
-        signalsRepo.flush()
+        signalsRepo.flush(),
+        subscriptionsRepo.flush(),
+        usersRepo.flush(),
+        quotaRepo.flush(),
+        dedupRepo.flush()
       ]);
 
       try { await klinesRepo.flushAll(); } catch {}
