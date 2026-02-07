@@ -238,7 +238,7 @@ export class SignalsRepo {
     const data = await this.readDay(dayKey);
     const eventsRaw = Array.isArray(data?.events) ? data.events : [];
     const events = scopeId
-      ? eventsRaw.filter((ev) => String(ev?.scopeId ?? ev?.meta?.scopeId || "") === String(scopeId))
+      ? eventsRaw.filter((ev) => String(ev?.scopeId ?? ev?.meta?.scopeId ?? "") === String(scopeId))
       : eventsRaw;
 
     const stats = {
