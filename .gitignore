@@ -7,12 +7,20 @@
 # node
 node_modules/
 
-# runtime data
-data/state.json
-data/positions.json
-data/scan-rotation.json
-data/signals/*.json
-data/klines/*.json
+# runtime data (DO NOT COMMIT)
+data/*.json
+data/groups/
+data/klines/**
+
+# keep daily signals tracked
+!data/signals/
+!data/signals/*.json
+
+# Keep placeholders
+!data/.keep
+!data/signals/.keep
+!data/klines/.keep
+
 *.log
 
 # ssh keys
