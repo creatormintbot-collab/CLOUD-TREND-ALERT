@@ -3,24 +3,51 @@ function num(x) {
   return Number.isFinite(n) ? n : 0;
 }
 
-export function cohortActiveCard({ timeKey, rows = [] } = {}) {
+export function cohortActiveCard({
+  timeKey,
+  totalCreated = 0,
+  autoSent = 0,
+  scanSignalsSent = 0,
+  entryHits = 0,
+  tp1Hits = 0,
+  tp2Hits = 0,
+  tp3Hits = 0,
+  tradingClosed = 0,
+  winCount = 0,
+  directSlCount = 0,
+  expiredCount = 0,
+  winrate = "N/A",
+  directSlRate = "N/A",
+  list = [],
+  moreCount = 0
+} = {}) {
   const lines = [
     "CLOUD TREND ALERT",
     "━━━━━━━━━━━━━━━━━━",
-    "🧪 COHORT ACTIVE (UTC)",
-    `📆 Window: last 7 days | 🕒 Now: ${timeKey}`,
+    "🧪 COHORT (UTC) — ACTIVE 7D",
+    `📆 Window: last 7d | 🕒 Now: ${timeKey}`,
     "",
-    "📊 Open/Pending by Created Date"
+    `🧠 Created (7D): ${num(totalCreated)} (AUTO ${num(autoSent)} | /scan ${num(scanSignalsSent)})`,
+    "",
+    "📈 Progress (7D)",
+    `• Entry Hits: ${num(entryHits)} | TP1: ${num(tp1Hits)} | TP2: ${num(tp2Hits)} | TP3: ${num(tp3Hits)}`,
+    "",
+    "✅ Outcomes (Trading Only)",
+    `• Trading Closed: ${num(tradingClosed)} (🏆 WIN TP1+: ${num(winCount)} | 🛑 LOSS Direct SL: ${num(directSlCount)})`,
+    `• ⏳ Expired (No Entry): ${num(expiredCount)}`,
+    `• 📊 Rates (Trading Only): Winrate ${winrate} | Direct SL Rate ${directSlRate}`,
+    "",
+    "📋 Open List (Top 15)"
   ];
 
-  if (rows.length) {
-    for (const row of rows) {
-      lines.push(`• ${row.dateKey}: Pending ${num(row.pending)} | Open ${num(row.open)}`);
-    }
+  if (list.length) {
+    for (const row of list) lines.push(`• ${row}`);
   }
 
-  lines.push("");
-  lines.push("🧩 Tip: /cohort YYYY-MM-DD for details (Top 15 list).");
+  if (moreCount > 0) {
+    lines.push(`... (+${moreCount} more)`);
+  }
+
   lines.push("━━━━━━━━━━━━━━━━━━");
   lines.push("⚠️ Not Financial Advice");
   return lines.join("\n");

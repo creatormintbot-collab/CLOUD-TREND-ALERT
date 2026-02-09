@@ -23,6 +23,10 @@ export function validateEnvOrThrow() {
     throw new Error(`SECONDARY_TIMEFRAME invalid: ${env.SECONDARY_TIMEFRAME}`);
   }
 
+  if (env.AUTO_TRIGGER_TF && !allowedTfs.has(String(env.AUTO_TRIGGER_TF).toLowerCase())) {
+    throw new Error(`AUTO_TRIGGER_TF invalid: ${env.AUTO_TRIGGER_TF}`);
+  }
+
   if (Array.isArray(env.AUTO_TIMEFRAMES) && env.AUTO_TIMEFRAMES.length) {
     const badAuto = env.AUTO_TIMEFRAMES.filter((tf) => !allowedTfs.has(String(tf).toLowerCase()));
     if (badAuto.length) throw new Error(`AUTO_TIMEFRAMES contains invalid timeframe(s): ${badAuto.join(", ")}`);

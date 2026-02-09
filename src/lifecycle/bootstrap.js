@@ -20,6 +20,7 @@ import { inc as incGroupStat } from "../storage/groupStatsRepo.js";
 
 import { Ranker } from "../selection/ranker.js";
 import { Pipeline } from "../selection/pipeline.js";
+import { intervalToMs, normalizeInterval } from "../exchange/intervals.js";
 
 import { startTelegram } from "../bot/telegram.js";
 import { Sender } from "../bot/sender.js";
@@ -154,139 +155,197 @@ export async function bootstrap() {
     cards: { tp1Card, tp2Card, tp3Card, slCard }
   });
 
-    const runAuto = async () => {
+  const runAuto = async () => {
+    const triggerTf = normalizeInterval(env.AUTO_TRIGGER_TF || "15m");
+    const tfMs = intervalToMs(triggerTf);
+    const nowMs = Date.now();
+    const lastClosed = (Math.floor((nowMs - 1) / tfMs) * tfMs) + tfMs - 1;
+    const lastAuto = stateRepo.lastAutoCandle(triggerTf);
+    const deltaMs = lastClosed - lastAuto;
 
-  const todayAuto = stateRepo.getAutoTotalToday();
-  if (todayAuto >= env.MAX_SIGNALS_PER_DAY) return;
-  const todayKey = utcDateKey();
+    logger.info("[AUTO_SCAN] tick start", { triggerTf, lastAuto, lastClosed, deltaMs });
 
-  let advanced = false;
-  for (const tf of [...env.SCAN_TIMEFRAMES, env.SECONDARY_TIMEFRAME]) {
-    const clock = klines.lastClosedTime(tf);
-    if (clock && clock > stateRepo.lastAutoCandle(tf)) advanced = true;
-  }
-  if (!advanced) return;
-
-  const candidates = await pipeline.autoPickCandidates();
-  if (!candidates.length) {
-    for (const tf of [...env.SCAN_TIMEFRAMES, env.SECONDARY_TIMEFRAME]) {
-      const clock = klines.lastClosedTime(tf);
-      if (clock) stateRepo.markAutoCandle(tf, clock);
-    }
-    await stateRepo.flush();
-    return;
-  }
-
-  const remaining = Math.max(0, env.MAX_SIGNALS_PER_DAY - todayAuto);
-  const limit = Math.min(env.SEND_TOP_N, remaining);
-
-  const normTf = (x) => String(x || "").trim().toLowerCase();
-  const swingTf = normTf(env.SECONDARY_TIMEFRAME || "4h");
-  const playbookOf = (sig) => String(sig?.playbook || (normTf(sig?.tf) === swingTf ? "SWING" : "INTRADAY")).toUpperCase();
-  const dirOf = (sig) => String(sig?.direction || "").toUpperCase();
-
-  // LOCK: AUTO prefers top Swing + top Intraday (max 2), with guardrails.
-  let bestSwing = null;
-  let bestIntra = null;
-
-  for (const sig of candidates) {
-    const pb = playbookOf(sig);
-    if (pb === "SWING" && !bestSwing) bestSwing = sig;
-    if (pb === "INTRADAY" && !bestIntra) bestIntra = sig;
-    if (bestSwing && bestIntra) break;
-  }
-
-  const preliminary = [];
-  if (limit >= 1) {
-    const primary = bestSwing || bestIntra;
-    if (primary) preliminary.push(primary);
-  }
-
-  if (limit >= 2 && bestSwing && bestIntra) {
-    const symSame = String(bestSwing.symbol) === String(bestIntra.symbol);
-    const dirSame = dirOf(bestSwing) === dirOf(bestIntra) && dirOf(bestSwing) !== "";
-
-    if (symSame && dirSame) {
-      // Confluence: prefer Swing only + tag
-      bestSwing.confluence = true;
-      bestSwing.confluenceTfs = Array.from(new Set([bestIntra.tf, bestSwing.tf].filter(Boolean)));
-    } else if (symSame && !dirSame) {
-      // Opposite direction on same pair: find another intraday candidate (different symbol)
-      let alt = null;
-      for (const sig of candidates) {
-        if (playbookOf(sig) !== "INTRADAY") continue;
-        if (String(sig.symbol) === String(bestSwing.symbol)) continue;
-        alt = sig;
-        break;
-      }
-      if (alt) preliminary.push(alt);
-    } else {
-      // Different symbols: allow both
-      if (preliminary.length === 1 && preliminary[0] === bestSwing) preliminary.push(bestIntra);
-      else if (preliminary.length === 1 && preliminary[0] === bestIntra) preliminary.unshift(bestSwing);
-    }
-  }
-
-  // LOCK: cooldown at least per pair+direction, ideally per playbook.
-  const chosen = [];
-  for (const sig of preliminary) {
-    const pb = playbookOf(sig);
-    const dir = dirOf(sig);
-    if (!dir) continue;
-
-    const okPlaybook = typeof stateRepo.canSendPairSidePlaybook === "function"
-      ? stateRepo.canSendPairSidePlaybook(sig.symbol, dir, pb, env.COOLDOWN_MINUTES)
-      : null;
-
-    const ok = (okPlaybook !== null)
-      ? okPlaybook
-      : (typeof stateRepo.canSendPairSide === "function"
-        ? stateRepo.canSendPairSide(sig.symbol, dir, env.COOLDOWN_MINUTES)
-        : stateRepo.canSendSymbol(sig.symbol, env.COOLDOWN_MINUTES));
-
-    if (!ok) continue;
-
-    chosen.push(sig);
-
-    if (typeof stateRepo.markSentPairSidePlaybook === "function") stateRepo.markSentPairSidePlaybook(sig.symbol, dir, pb);
-    else if (typeof stateRepo.markSentPairSide === "function") stateRepo.markSentPairSide(sig.symbol, dir);
-    else stateRepo.markSent(sig.symbol);
-  }
-
-  for (const tf of [...env.SCAN_TIMEFRAMES, env.SECONDARY_TIMEFRAME]) {
-    const clock = klines.lastClosedTime(tf);
-    if (clock) stateRepo.markAutoCandle(tf, clock);
-  }
-
-  for (const sig of chosen) {
-    const overlays = buildOverlays(sig);
-    const png = await renderEntryChart(sig, overlays);
-
-    const entryMessageIds = {};
-
-    for (const chatId of notifyChatIds) {
-      await sender.sendPhoto(chatId, png);
-      const msg = await sender.sendText(chatId, entryCard(sig));
-      if (msg?.message_id) entryMessageIds[String(chatId)] = msg.message_id;
-      if (msg) {
-        try {
-          await incGroupStat(chatId, todayKey, "autoSignalsSent", 1);
-        } catch {}
-      }
+    if (lastAuto >= lastClosed) {
+      logger.info("[AUTO_SCAN] skip_no_new_candle", { triggerTf, lastAuto, lastClosed });
+      return;
     }
 
-    const pos = createPositionFromSignal(sig, {
-      source: "AUTO",
-      notifyChatIds,
-      telegram: Object.keys(entryMessageIds).length ? { entryMessageIds } : null
+    const todayAuto = stateRepo.getAutoTotalToday();
+    const maxPerDay = env.MAX_SIGNALS_PER_DAY;
+    const todayKey = utcDateKey();
+
+    if (todayAuto >= maxPerDay) {
+      stateRepo.markAutoCandle(triggerTf, lastClosed);
+      await stateRepo.flush();
+      logger.info("[AUTO_SCAN] run_end", {
+        triggerTf,
+        created: 0,
+        sent: 0,
+        reason: "max_signals_reached",
+        alreadySentToday: todayAuto,
+        maxPerDay
+      });
+      return;
+    }
+
+    logger.info("[AUTO_SCAN] run_start", {
+      triggerTf,
+      asOf: new Date(lastClosed).toISOString(),
+      maxPerDay,
+      alreadySentToday: todayAuto
     });
-    positionsRepo.upsert(pos);
 
-    stateRepo.bumpAuto(sig.tf, sig.score, sig.macro.BTC_STATE);
-    await signalsRepo.logEntry({ source: "AUTO", signal: sig, meta: { publishedTo: notifyChatIds } });
-  }
+    const autoSymbols = (typeof universe.symbolsForAuto === "function"
+      ? universe.symbolsForAuto()
+      : (typeof universe.symbols === "function" ? universe.symbols() : [])) || [];
 
-  await Promise.all([positionsRepo.flush(), stateRepo.flush(), signalsRepo.flush()]);
+    const baseTfs = Array.isArray(env.AUTO_TIMEFRAMES) && env.AUTO_TIMEFRAMES.length
+      ? env.AUTO_TIMEFRAMES
+      : (Array.isArray(env.SCAN_TIMEFRAMES) ? env.SCAN_TIMEFRAMES : []);
+    const autoTfs = [...baseTfs];
+    if (env.SECONDARY_TIMEFRAME && !autoTfs.includes(env.SECONDARY_TIMEFRAME)) autoTfs.push(env.SECONDARY_TIMEFRAME);
+
+    const universeCount = Array.isArray(autoSymbols) ? autoSymbols.length : 0;
+    const topN = Math.max(0, Math.floor(Number(env.TOP10_PER_TF || 0)));
+    const scanned = (topN > 0 && universeCount > 0) ? (Math.min(universeCount, topN) * autoTfs.length) : 0;
+
+    const candidates = await pipeline.autoPickCandidates();
+
+    const remaining = Math.max(0, maxPerDay - todayAuto);
+    const limit = Math.min(env.SEND_TOP_N, remaining);
+
+    const normTf = (x) => String(x || "").trim().toLowerCase();
+    const swingTf = normTf(env.SECONDARY_TIMEFRAME || "4h");
+    const playbookOf = (sig) => String(sig?.playbook || (normTf(sig?.tf) === swingTf ? "SWING" : "INTRADAY")).toUpperCase();
+    const dirOf = (sig) => String(sig?.direction || "").toUpperCase();
+
+    // LOCK: AUTO prefers top Swing + top Intraday (max 2), with guardrails.
+    let bestSwing = null;
+    let bestIntra = null;
+
+    for (const sig of candidates) {
+      const pb = playbookOf(sig);
+      if (pb === "SWING" && !bestSwing) bestSwing = sig;
+      if (pb === "INTRADAY" && !bestIntra) bestIntra = sig;
+      if (bestSwing && bestIntra) break;
+    }
+
+    const preliminary = [];
+    if (limit >= 1) {
+      const primary = bestSwing || bestIntra;
+      if (primary) preliminary.push(primary);
+    }
+
+    if (limit >= 2 && bestSwing && bestIntra) {
+      const symSame = String(bestSwing.symbol) === String(bestIntra.symbol);
+      const dirSame = dirOf(bestSwing) === dirOf(bestIntra) && dirOf(bestSwing) !== "";
+
+      if (symSame && dirSame) {
+        // Confluence: prefer Swing only + tag
+        bestSwing.confluence = true;
+        bestSwing.confluenceTfs = Array.from(new Set([bestIntra.tf, bestSwing.tf].filter(Boolean)));
+      } else if (symSame && !dirSame) {
+        // Opposite direction on same pair: find another intraday candidate (different symbol)
+        let alt = null;
+        for (const sig of candidates) {
+          if (playbookOf(sig) !== "INTRADAY") continue;
+          if (String(sig.symbol) === String(bestSwing.symbol)) continue;
+          alt = sig;
+          break;
+        }
+        if (alt) preliminary.push(alt);
+      } else {
+        // Different symbols: allow both
+        if (preliminary.length === 1 && preliminary[0] === bestSwing) preliminary.push(bestIntra);
+        else if (preliminary.length === 1 && preliminary[0] === bestIntra) preliminary.unshift(bestSwing);
+      }
+    }
+
+    // LOCK: cooldown at least per pair+direction, ideally per playbook.
+    const chosen = [];
+    for (const sig of preliminary) {
+      const pb = playbookOf(sig);
+      const dir = dirOf(sig);
+      if (!dir) continue;
+
+      const okPlaybook = typeof stateRepo.canSendPairSidePlaybook === "function"
+        ? stateRepo.canSendPairSidePlaybook(sig.symbol, dir, pb, env.COOLDOWN_MINUTES)
+        : null;
+
+      const ok = (okPlaybook !== null)
+        ? okPlaybook
+        : (typeof stateRepo.canSendPairSide === "function"
+          ? stateRepo.canSendPairSide(sig.symbol, dir, env.COOLDOWN_MINUTES)
+          : stateRepo.canSendSymbol(sig.symbol, env.COOLDOWN_MINUTES));
+
+      if (!ok) continue;
+
+      chosen.push(sig);
+
+      if (typeof stateRepo.markSentPairSidePlaybook === "function") stateRepo.markSentPairSidePlaybook(sig.symbol, dir, pb);
+      else if (typeof stateRepo.markSentPairSide === "function") stateRepo.markSentPairSide(sig.symbol, dir);
+      else stateRepo.markSent(sig.symbol);
+    }
+
+    logger.info("[AUTO_SCAN] candidates", {
+      triggerTf,
+      universe: universeCount,
+      scanned,
+      passedGates: candidates.length,
+      selected: chosen.length
+    });
+
+    if (!candidates.length) {
+      stateRepo.markAutoCandle(triggerTf, lastClosed);
+      await stateRepo.flush();
+      logger.info("[AUTO_SCAN] run_end", { triggerTf, created: 0, sent: 0, reason: "no_candidates" });
+      return;
+    }
+
+    if (!chosen.length) {
+      stateRepo.markAutoCandle(triggerTf, lastClosed);
+      await stateRepo.flush();
+      logger.info("[AUTO_SCAN] run_end", { triggerTf, created: 0, sent: 0, reason: "no_selection" });
+      return;
+    }
+
+    let created = 0;
+    let sent = 0;
+
+    for (const sig of chosen) {
+      created += 1;
+      const overlays = buildOverlays(sig);
+      const png = await renderEntryChart(sig, overlays);
+
+      const entryMessageIds = {};
+
+      for (const chatId of notifyChatIds) {
+        await sender.sendPhoto(chatId, png);
+        const msg = await sender.sendText(chatId, entryCard(sig));
+        if (msg?.message_id) entryMessageIds[String(chatId)] = msg.message_id;
+        if (msg) {
+          sent += 1;
+          try {
+            await incGroupStat(chatId, todayKey, "autoSignalsSent", 1);
+          } catch {}
+        }
+      }
+
+      const pos = createPositionFromSignal(sig, {
+        source: "AUTO",
+        notifyChatIds,
+        telegram: Object.keys(entryMessageIds).length ? { entryMessageIds } : null
+      });
+      positionsRepo.upsert(pos);
+
+      stateRepo.bumpAuto(sig.tf, sig.score, sig.macro.BTC_STATE);
+      await signalsRepo.logEntry({ source: "AUTO", signal: sig, meta: { publishedTo: notifyChatIds } });
+    }
+
+    stateRepo.markAutoCandle(triggerTf, lastClosed);
+
+    await Promise.all([positionsRepo.flush(), stateRepo.flush(), signalsRepo.flush()]);
+    logger.info("[AUTO_SCAN] run_end", { triggerTf, created, sent, reason: "ok" });
   };
 
 
@@ -414,7 +473,10 @@ export async function bootstrap() {
     }
   });
 
-  const autoJob = startAutoScanJob({ run: runAuto });
+  const autoJob = startAutoScanJob({
+    run: runAuto,
+    onError: (err) => logger.error("[AUTO_SCAN] run_error", { err })
+  });
   const monitorJob = startMonitorJob({ intervalSec: env.PRICE_MONITOR_INTERVAL_SEC, run: runMonitor });
   let recapJob = null;
   // Daily recap job is disabled (manual /info only).

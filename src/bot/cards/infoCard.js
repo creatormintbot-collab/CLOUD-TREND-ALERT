@@ -6,8 +6,8 @@ function num(x) {
 function pct(a, b) {
   const A = Number(a);
   const B = Number(b);
-  if (!Number.isFinite(A) || !Number.isFinite(B) || B <= 0) return "0.0";
-  return ((A / B) * 100).toFixed(1);
+  if (!Number.isFinite(A) || !Number.isFinite(B) || B <= 0) return "N/A";
+  return ((A / B) * 100).toFixed(1) + "%";
 }
 
 export function infoCard({
@@ -48,9 +48,7 @@ export function infoCard({
     `• Closed: ${closed} (Win≥TP1 ${num(winCount)} | Direct SL ${num(directSlCount)} | Giveback ${num(givebackCount)})`
   ];
 
-  if (closed > 0) {
-    lines.push(`• Rates: Winrate ${winrate}% | Direct SL Rate ${slRate}%`);
-  }
+  lines.push(`• Rates: Winrate ${winrate} | Direct SL Rate ${slRate}`);
 
   lines.push("");
   lines.push("🌐 Macro (UTC)");

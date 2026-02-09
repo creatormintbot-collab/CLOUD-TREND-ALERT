@@ -48,6 +48,7 @@ export const env = {
   SECONDARY_TIMEFRAME: (process.env.SECONDARY_TIMEFRAME || "4h").toLowerCase(),
   INTRADAY_TIMEFRAMES: list(process.env.INTRADAY_TIMEFRAMES || "").map((x) => x.toLowerCase()),
   SECONDARY_MIN_SCORE: num(process.env.SECONDARY_MIN_SCORE, 80),
+  AUTO_TRIGGER_TF: (process.env.AUTO_TRIGGER_TF || "15m").toLowerCase(),
 
   // Strategy switch (optional). Empty = legacy scoring-only mode.
   STRATEGY: (process.env.STRATEGY || "").trim(),
