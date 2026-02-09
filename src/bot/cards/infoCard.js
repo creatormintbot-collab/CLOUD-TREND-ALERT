@@ -12,48 +12,44 @@ function pct(a, b) {
 
 export function infoCard({
   dateKey,
+  generatedKey,
+  generatedTime,
   totalCreated = 0,
   autoSent = 0,
   scanSignalsSent = 0,
   scanOk = 0,
   entryHits = 0,
-  closedCount = 0,
   winCount = 0,
   directSlCount = 0,
-  givebackCount = 0,
-  bullCount = 0,
-  bearCount = 0,
-  neutralCount = 0
+  expiredCount = 0
 } = {}) {
   const created = Number.isFinite(Number(totalCreated))
     ? Number(totalCreated)
     : num(autoSent) + num(scanSignalsSent);
-  const closed = num(closedCount);
-  const winrate = pct(winCount, closed);
-  const slRate = pct(directSlCount, closed);
+  const tradingClosed = num(winCount) + num(directSlCount);
+  const winrate = pct(winCount, tradingClosed);
+  const slRate = pct(directSlCount, tradingClosed);
 
   const lines = [
-    "CLOUD TREND ALERT",
-    "━━━━━━━━━━━━━━━━━━",
-    "🗓 DAILY RECAP (UTC)",
-    `📅 Date: ${dateKey}`,
+    "🤖 CLOUD TREND ALERT",
+    "───────────────────",
+    "📅 DAILY RECAP (UTC)",
+    `Day: ${dateKey} | Generated: ${generatedKey} ${generatedTime} (UTC)`,
+    "Scope: This chat only (UTC)",
     "",
-    "🧠 Activity (Created That Day)",
-    `• Signals Created: ${num(created)} (AUTO ${num(autoSent)} | /scan ${num(scanSignalsSent)})`,
-    `• /scan Requests (success): ${num(scanOk)}`,
-    `• Signals Sent: AUTO ${num(autoSent)} | /scan ${num(scanSignalsSent)}`,
+    "🧠 CREATED",
+    `• Signals: ${num(created)} (AUTO ${num(autoSent)} | /scan ${num(scanSignalsSent)})`,
+    `• /scan OK: ${num(scanOk)}`,
     "",
-    "📌 Events (That Day)",
+    "📈 PROGRESS",
     `• Entry Hits: ${num(entryHits)}`,
-    `• Closed: ${closed} (Win≥TP1 ${num(winCount)} | Direct SL ${num(directSlCount)} | Giveback ${num(givebackCount)})`
+    "",
+    "✅ OUTCOMES",
+    `• Trading Closed: ${tradingClosed} (W ${num(winCount)} | L ${num(directSlCount)})`,
+    `• Expired: ${num(expiredCount)}`
   ];
 
   lines.push(`• Rates: Winrate ${winrate} | Direct SL Rate ${slRate}`);
-
-  lines.push("");
-  lines.push("🌐 Macro (UTC)");
-  lines.push(`• BULL: ${num(bullCount)} | BEAR: ${num(bearCount)} | NEUTRAL: ${num(neutralCount)}`);
-  lines.push("━━━━━━━━━━━━━━━━━━");
-  lines.push("⚠️ Not Financial Advice");
+  lines.push("", "───────────────────", "⚠️ Not Financial Advice");
   return lines.join("\n");
 }

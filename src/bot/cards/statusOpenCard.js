@@ -5,7 +5,6 @@ function num(x) {
 
 export function statusOpenCard({
   timeKey,
-  showing = 0,
   openFilled = 0,
   pendingEntry = 0,
   carried = 0,
@@ -13,26 +12,30 @@ export function statusOpenCard({
   moreCount = 0
 } = {}) {
   const lines = [
-    "CLOUD TREND ALERT",
-    "━━━━━━━━━━━━━━━━━━",
-    "📍 OPEN POSITIONS (UTC)",
-    `🕒 Now: ${timeKey} | Showing: ${num(showing)}`,
+    "🤖 CLOUD TREND ALERT",
+    "───────────────────",
+    "📌 STATUS OPEN (UTC)",
+    `Now: ${timeKey} (UTC)`,
+    "Scope: This chat only (UTC)",
     "",
-    "🧾 Summary",
-    `• Open (Filled): ${num(openFilled)} | Pending Entry: ${num(pendingEntry)} | Carried: ${num(carried)}`,
+    "📌 NOW",
+    `• Open (Filled): ${num(openFilled)}`,
+    `• Pending Entry: ${num(pendingEntry)}`,
+    `• Carried: ${num(carried)}`,
     "",
-    "📋 List"
+    "📄 OPEN LIST"
   ];
 
   if (list.length) {
     for (const row of list) lines.push(`• ${row}`);
+  } else {
+    lines.push("• None");
   }
 
   if (moreCount > 0) {
-    lines.push(`... (+${moreCount} more)`);
+    lines.push(`• ... (+${moreCount} more)`);
   }
 
-  lines.push("━━━━━━━━━━━━━━━━━━");
-  lines.push("⚠️ Not Financial Advice");
+  lines.push("", "───────────────────", "⚠️ Not Financial Advice");
   return lines.join("\n");
 }

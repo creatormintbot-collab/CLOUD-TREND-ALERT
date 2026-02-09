@@ -3,6 +3,13 @@ function num(x) {
   return Number.isFinite(n) ? n : 0;
 }
 
+function pct(a, b) {
+  const A = Number(a);
+  const B = Number(b);
+  if (!Number.isFinite(A) || !Number.isFinite(B) || B <= 0) return "N/A";
+  return ((A / B) * 100).toFixed(1) + "%";
+}
+
 export function statusCard({
   dateKey,
   timeKey,
@@ -11,10 +18,9 @@ export function statusCard({
   scanSignalsSent = 0,
   scanOk = 0,
   entryHits = 0,
-  closedCount = 0,
   winCount = 0,
   directSlCount = 0,
-  givebackCount = 0,
+  expiredCount = 0,
   openFilled = 0,
   pendingEntry = 0,
   carried = 0,
@@ -24,25 +30,36 @@ export function statusCard({
   const created = Number.isFinite(Number(totalCreated))
     ? Number(totalCreated)
     : num(autoSent) + num(scanSignalsSent);
+  const tradingClosed = num(winCount) + num(directSlCount);
+  const winrate = pct(winCount, tradingClosed);
+  const slRate = pct(directSlCount, tradingClosed);
 
   return [
-    "CLOUD TREND ALERT",
-    "━━━━━━━━━━━━━━━━━━",
-    "🧭 STATUS (UTC)",
-    `📅 Today: ${dateKey} | 🕒 Now: ${timeKey}`,
+    "🤖 CLOUD TREND ALERT",
+    "───────────────────",
+    "⏱️ STATUS (UTC)",
+    `Today: ${dateKey} | Now: ${timeKey} (UTC)`,
+    "Scope: This chat only (UTC)",
     "",
-    "🤖 TODAY (Events)",
-    `• Signals Created: ${num(created)} (AUTO ${num(autoSent)} | /scan ${num(scanSignalsSent)})`,
-    `• /scan Requests (success): ${num(scanOk)}`,
+    "🧠 CREATED",
+    `• Signals: ${num(created)} (AUTO ${num(autoSent)} | /scan ${num(scanSignalsSent)})`,
+    `• /scan OK: ${num(scanOk)}`,
+    "",
+    "📈 PROGRESS",
     `• Entry Hits: ${num(entryHits)}`,
-    `• Closed: ${num(closedCount)} (Win≥TP1 ${num(winCount)} | Direct SL ${num(directSlCount)} | Giveback ${num(givebackCount)})`,
     "",
-    "📌 NOW (Snapshot)",
-    `• Open (Filled): ${num(openFilled)} | Pending Entry: ${num(pendingEntry)} | Carried: ${num(carried)}`,
-    `• By Mode: INTRADAY ${num(intradayCount)} | SWING ${num(swingCount)}`,
+    "✅ OUTCOMES",
+    `• Trading Closed: ${tradingClosed} (W ${num(winCount)} | L ${num(directSlCount)})`,
+    `• Expired: ${num(expiredCount)}`,
+    `• Rates: Winrate ${winrate} | Direct SL Rate ${slRate}`,
     "",
-    "🧩 Tip: /statusopen (open list) • /statusclosed (today closed) • /cohort (7d active)",
-    "━━━━━━━━━━━━━━━━━━",
+    "📌 NOW",
+    `• Open (Filled): ${num(openFilled)} | Pending: ${num(pendingEntry)} | Carried: ${num(carried)}`,
+    `• Modes: INTRADAY ${num(intradayCount)} | SWING ${num(swingCount)}`,
+    "",
+    "Tip: /statusopen for open list • /statusclosed for today closed • /cohort for 7D",
+    "",
+    "───────────────────",
     "⚠️ Not Financial Advice"
   ].join("\n");
 }

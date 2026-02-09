@@ -1,6 +1,7 @@
 import path from "node:path";
 import fs from "node:fs";
 import { DATA_DIR } from "../config/constants.js";
+import { utcDateKey } from "../utils/time.js";
 import { readJson, writeJsonAtomic } from "./jsonStore.js";
 
 // NOTE: repo path is aligned with current project structure:
@@ -47,6 +48,32 @@ export class PositionsRepo {
   listActive() {
     // Active = anything not CLOSED and not EXPIRED
     return Object.values(this.positions).filter((p) => p && p.status !== "CLOSED" && p.status !== "EXPIRED");
+  }
+
+  listByCreatedDay(dateKey) {
+    const dk = String(dateKey || "").trim();
+    if (!dk) return [];
+    return Object.values(this.positions).filter((p) => {
+      const createdAt = Number(p?.createdAt || 0);
+      if (!Number.isFinite(createdAt) || createdAt <= 0) return false;
+      return utcDateKey(createdAt) === dk;
+    });
+  }
+
+  listByCreatedDayRange(startKey, endKey) {
+    const start = String(startKey || "").trim();
+    const end = String(endKey || "").trim();
+    const startMs = Date.parse(`${start}T00:00:00.000Z`);
+    const endMs = Date.parse(`${end}T23:59:59.999Z`);
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return [];
+    const lo = Math.min(startMs, endMs);
+    const hi = Math.max(startMs, endMs);
+
+    return Object.values(this.positions).filter((p) => {
+      const createdAt = Number(p?.createdAt || 0);
+      if (!Number.isFinite(createdAt) || createdAt <= 0) return false;
+      return createdAt >= lo && createdAt <= hi;
+    });
   }
 
   findActiveBySymbolTf(symbol, tf) {

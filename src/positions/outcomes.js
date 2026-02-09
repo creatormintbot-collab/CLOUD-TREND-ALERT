@@ -32,14 +32,34 @@ function hasAny(str, needles = []) {
   return needles.some((n) => s.includes(n));
 }
 
-function flagsFromEvents(events = []) {
-  const flags = {
+function tpFromTag(tag) {
+  const t = normTag(tag);
+  if (!t) return 0;
+  if (t.includes("TP3")) return 3;
+  if (t.includes("TP2")) return 2;
+  if (t.includes("TP1")) return 1;
+  return 0;
+}
+
+function baseFlags() {
+  return {
+    maxTpHit: 0,
     hasTP1Plus: false,
     hasSL: false,
-    hasFilled: false,
-    hasExpiredNoEntry: false,
-    isClosed: false
+    hasEntry: false,
+    isExpired: false
   };
+}
+
+function applyTp(flags, tp) {
+  const v = Number(tp);
+  if (!Number.isFinite(v) || v <= 0) return;
+  flags.maxTpHit = Math.max(flags.maxTpHit, v);
+  if (flags.maxTpHit >= 1) flags.hasTP1Plus = true;
+}
+
+function flagsFromEvents(events = []) {
+  const flags = baseFlags();
 
   for (const ev of Array.isArray(events) ? events : []) {
     if (!ev) continue;
@@ -49,89 +69,85 @@ function flagsFromEvents(events = []) {
     const closeOutcome = normTag(ev.closeOutcome);
     const slBeforeTp1 = closeOutcome.includes("BEFORE_TP1") || closeOutcome.includes("SL_BEFORE_TP1") || closeOutcome.includes("STOP_LOSS_BEFORE_TP1");
 
-    if (evName === "TP1" || evName === "TP2" || evName === "TP3") flags.hasTP1Plus = true;
-    if (evName === "TP3") flags.isClosed = true;
+    if (evName === "TP1") applyTp(flags, 1);
+    if (evName === "TP2") applyTp(flags, 2);
+    if (evName === "TP3") applyTp(flags, 3);
 
-    if (evName === "SL" || evName === "STOP_LOSS") {
-      flags.hasSL = true;
-      flags.isClosed = true;
-    }
+    if (ev?.hit?.tp1) applyTp(flags, 1);
+    if (ev?.hit?.tp2) applyTp(flags, 2);
+    if (ev?.hit?.tp3) applyTp(flags, 3);
 
-    if (evName === "FILLED") flags.hasFilled = true;
+    if (evName === "SL" || evName === "STOP_LOSS") flags.hasSL = true;
+    if (evName === "FILLED" || evName === "ENTRY" || evName === "ENTRY_FILLED") flags.hasEntry = true;
+    if (hasAny(evName, ["EXPIRED", "NO_ENTRY", "NOENTRY", "PENDING_TIMEOUT"])) flags.isExpired = true;
 
-    if (hasAny(evName, ["EXPIRED", "NO_ENTRY", "NOENTRY", "PENDING_TIMEOUT"])) {
-      flags.hasExpiredNoEntry = true;
-      flags.isClosed = true;
-    }
+    if (status === "RUNNING" || status === "FILLED") flags.hasEntry = true;
+    if (status === "EXPIRED") flags.isExpired = true;
 
-    if (status === "RUNNING") flags.hasFilled = true;
-    if (status === "EXPIRED") {
-      flags.hasExpiredNoEntry = true;
-      flags.isClosed = true;
-    }
-    if (status === "CLOSED" || status.startsWith("CLOSED")) flags.isClosed = true;
-
-    if (!slBeforeTp1 && hasAny(closeOutcome, ["TP1", "TP2", "TP3"])) flags.hasTP1Plus = true;
-    if (hasAny(closeOutcome, ["STOP_LOSS", "SL_"])) {
-      flags.hasSL = true;
-      flags.isClosed = true;
-    }
-    if (hasAny(closeOutcome, ["EXPIRED"])) {
-      flags.hasExpiredNoEntry = true;
-      flags.isClosed = true;
-    }
-
-    if (Number(ev.closedAt || 0) > 0) flags.isClosed = true;
+    if (!slBeforeTp1) applyTp(flags, tpFromTag(closeOutcome));
+    if (hasAny(closeOutcome, ["STOP_LOSS", "SL_"])) flags.hasSL = true;
+    if (hasAny(closeOutcome, ["EXPIRED"])) flags.isExpired = true;
   }
 
+  if (flags.maxTpHit >= 1) flags.hasEntry = true;
   return flags;
 }
 
 function flagsFromPos(pos) {
-  const flags = {
-    hasTP1Plus: false,
-    hasSL: false,
-    hasFilled: false,
-    hasExpiredNoEntry: false,
-    isClosed: false
-  };
+  const flags = baseFlags();
 
   if (!pos || typeof pos !== "object") return flags;
 
   const tp = getTpHitMax(pos);
-  if (tp >= 1) flags.hasTP1Plus = true;
+  applyTp(flags, tp);
+
   const closeOutcome = normTag(pos.closeOutcome);
   const slBeforeTp1 = closeOutcome.includes("BEFORE_TP1") || closeOutcome.includes("SL_BEFORE_TP1") || closeOutcome.includes("STOP_LOSS_BEFORE_TP1");
-  if (!slBeforeTp1 && hasAny(closeOutcome, ["TP1", "TP2", "TP3"])) flags.hasTP1Plus = true;
+  if (!slBeforeTp1) applyTp(flags, tpFromTag(closeOutcome));
 
   if (pos.slHit || pos.slHitAt || hasAny(pos.closeOutcome, ["STOP_LOSS", "SL_"])) flags.hasSL = true;
 
   const status = normTag(pos.status);
-  if (pos.filledAt || pos.entryHitAt || status === "RUNNING" || flags.hasTP1Plus) flags.hasFilled = true;
+  if (pos.filledAt || pos.entryHitAt || status === "RUNNING" || flags.hasTP1Plus) flags.hasEntry = true;
 
-  if (status === "EXPIRED" || hasAny(pos.closeOutcome, ["EXPIRED"])) flags.hasExpiredNoEntry = true;
-  if (status === "CLOSED" || status.startsWith("CLOSED") || Number(pos.closedAt || 0) > 0) flags.isClosed = true;
+  if (status === "EXPIRED" || pos.expiredAt || hasAny(pos.closeOutcome, ["EXPIRED"])) flags.isExpired = true;
 
+  if (flags.maxTpHit >= 1) flags.hasEntry = true;
   return flags;
 }
 
-export function classifyOutcome({ events = [], pos = null } = {}) {
-  const evFlags = flagsFromEvents(events);
+export function classifyOutcomeFromEvents(eventsForPosition = [], pos = null) {
+  const evFlags = flagsFromEvents(eventsForPosition);
   const posFlags = flagsFromPos(pos);
 
   const flags = {
+    maxTpHit: Math.max(evFlags.maxTpHit, posFlags.maxTpHit),
     hasTP1Plus: evFlags.hasTP1Plus || posFlags.hasTP1Plus,
     hasSL: evFlags.hasSL || posFlags.hasSL,
-    hasFilled: evFlags.hasFilled || posFlags.hasFilled,
-    hasExpiredNoEntry: evFlags.hasExpiredNoEntry || posFlags.hasExpiredNoEntry,
-    isClosed: evFlags.isClosed || posFlags.isClosed
+    hasEntry: evFlags.hasEntry || posFlags.hasEntry,
+    isExpired: evFlags.isExpired || posFlags.isExpired
   };
 
-  if (flags.hasExpiredNoEntry && !flags.hasFilled) return OUTCOME_CLASS.EXPIRED_NO_ENTRY;
-  if (flags.hasSL && flags.hasTP1Plus) return OUTCOME_CLASS.WIN_TP1_PLUS;
-  if (flags.hasSL && !flags.hasTP1Plus) return OUTCOME_CLASS.LOSS_DIRECT_SL;
-  if (flags.hasTP1Plus && flags.isClosed) return OUTCOME_CLASS.WIN_TP1_PLUS;
-  return OUTCOME_CLASS.OPEN_OR_UNKNOWN;
+  if (flags.maxTpHit >= 1) flags.hasTP1Plus = true;
+  if (flags.hasTP1Plus) flags.hasEntry = true;
+
+  let outcomeType = OUTCOME_CLASS.OPEN_OR_UNKNOWN;
+  if (flags.isExpired && !flags.hasEntry) outcomeType = OUTCOME_CLASS.EXPIRED_NO_ENTRY;
+  else if (flags.hasSL && !flags.hasTP1Plus) outcomeType = OUTCOME_CLASS.LOSS_DIRECT_SL;
+  else if (flags.hasTP1Plus) outcomeType = OUTCOME_CLASS.WIN_TP1_PLUS;
+
+  return {
+    outcomeType,
+    maxTpHit: flags.maxTpHit,
+    hasEntry: flags.hasEntry,
+    isExpired: flags.isExpired,
+    hasTP1Plus: flags.hasTP1Plus,
+    hasSL: flags.hasSL
+  };
+}
+
+export function classifyOutcome({ events = [], pos = null } = {}) {
+  return classifyOutcomeFromEvents(events, pos).outcomeType;
 }
 
 export function getTpHitMax(pos) {

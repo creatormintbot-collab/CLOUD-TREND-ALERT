@@ -12,92 +12,117 @@ export function cohortActiveCard({
   tp1Hits = 0,
   tp2Hits = 0,
   tp3Hits = 0,
-  tradingClosed = 0,
   winCount = 0,
   directSlCount = 0,
   expiredCount = 0,
-  winrate = "N/A",
-  directSlRate = "N/A",
   list = [],
   moreCount = 0
 } = {}) {
+  const tradingClosed = num(winCount) + num(directSlCount);
+  const winrate = tradingClosed > 0 ? ((num(winCount) / tradingClosed) * 100).toFixed(1) + "%" : "N/A";
+  const directSlRate = tradingClosed > 0 ? ((num(directSlCount) / tradingClosed) * 100).toFixed(1) + "%" : "N/A";
+
   const lines = [
-    "CLOUD TREND ALERT",
-    "━━━━━━━━━━━━━━━━━━",
+    "🤖 CLOUD TREND ALERT",
+    "───────────────────",
     "🧪 COHORT (UTC) — ACTIVE 7D",
-    `📆 Window: last 7d | 🕒 Now: ${timeKey}`,
+    `Window: last 7d | Now: ${timeKey} (UTC)`,
+    "Scope: This chat only (UTC)",
     "",
-    `🧠 Created (7D): ${num(totalCreated)} (AUTO ${num(autoSent)} | /scan ${num(scanSignalsSent)})`,
+    "🧠 CREATED",
+    `• Signals: ${num(totalCreated)} (AUTO ${num(autoSent)} | /scan ${num(scanSignalsSent)})`,
     "",
-    "📈 Progress (7D)",
-    `• Entry Hits: ${num(entryHits)} | TP1: ${num(tp1Hits)} | TP2: ${num(tp2Hits)} | TP3: ${num(tp3Hits)}`,
+    "📈 PROGRESS",
+    `• Entry Hits: ${num(entryHits)}`,
+    `• TP1: ${num(tp1Hits)} | TP2: ${num(tp2Hits)} | TP3: ${num(tp3Hits)}`,
     "",
-    "✅ Outcomes (Trading Only)",
-    `• Trading Closed: ${num(tradingClosed)} (🏆 WIN TP1+: ${num(winCount)} | 🛑 LOSS Direct SL: ${num(directSlCount)})`,
-    `• ⏳ Expired (No Entry): ${num(expiredCount)}`,
-    `• 📊 Rates (Trading Only): Winrate ${winrate} | Direct SL Rate ${directSlRate}`,
+    "✅ OUTCOMES",
+    `• Trading Closed: ${num(tradingClosed)} (W ${num(winCount)} | L ${num(directSlCount)})`,
+    `• Expired: ${num(expiredCount)}`,
+    `• Rates: Winrate ${winrate} | Direct SL Rate ${directSlRate}`,
     "",
-    "📋 Open List (Top 15)"
+    "📄 OPEN LIST"
   ];
 
   if (list.length) {
     for (const row of list) lines.push(`• ${row}`);
+  } else {
+    lines.push("• None");
   }
 
   if (moreCount > 0) {
-    lines.push(`... (+${moreCount} more)`);
+    lines.push(`• ... (+${moreCount} more)`);
   }
 
-  lines.push("━━━━━━━━━━━━━━━━━━");
-  lines.push("⚠️ Not Financial Advice");
+  lines.push("", "───────────────────", "⚠️ Not Financial Advice");
   return lines.join("\n");
 }
 
 export function cohortDetailCard({
   dateKey,
-  ageDays = 0,
   timeKey,
+  createdCount = 0,
   totalCreated = 0,
   autoSent = 0,
   scanSignalsSent = 0,
-  pendingEntry = 0,
-  openFilled = 0,
-  closedCount = 0,
-  expiredCount = 0,
-  entryHits = 0,
   winCount = 0,
   directSlCount = 0,
-  givebackCount = 0,
-  list = [],
-  moreCount = 0
+  expiredCount = 0,
+  activeCount = 0,
+  closedCount = 0,
+  activeList = [],
+  closedList = [],
+  moreActiveCount = 0,
+  moreClosedCount = 0
 } = {}) {
+  const tradingClosed = num(winCount) + num(directSlCount);
+  const winrate = tradingClosed > 0 ? ((num(winCount) / tradingClosed) * 100).toFixed(1) + "%" : "N/A";
+  const directSlRate = tradingClosed > 0 ? ((num(directSlCount) / tradingClosed) * 100).toFixed(1) + "%" : "N/A";
+
   const lines = [
-    "CLOUD TREND ALERT",
-    "━━━━━━━━━━━━━━━━━━",
-    "🧪 COHORT (UTC)",
-    `📅 Created Date: ${dateKey} | ⏳ Age: D+${num(ageDays)} | 🕒 Now: ${timeKey}`,
+    "🤖 CLOUD TREND ALERT",
+    "───────────────────",
+    `🧪 COHORT (UTC) — CREATED ${dateKey}`,
+    `Created: ${dateKey} | Now: ${timeKey} (UTC)`,
+    "Scope: This chat only (UTC)",
     "",
-    `🧬 Created: ${num(totalCreated)} (AUTO ${num(autoSent)} | /scan ${num(scanSignalsSent)})`,
+    "🧠 CREATED",
+    `• Positions: ${num(createdCount)}`,
+    `• Signals: ${num(totalCreated)} (AUTO ${num(autoSent)} | /scan ${num(scanSignalsSent)})`,
     "",
-    "📈 Progress (Now)",
-    `• Pending Entry: ${num(pendingEntry)} | Open (Filled): ${num(openFilled)} | Closed: ${num(closedCount)} | Expired: ${num(expiredCount)}`,
+    "✅ OUTCOMES",
+    `• Trading Closed: ${num(tradingClosed)} (W ${num(winCount)} | L ${num(directSlCount)})`,
+    `• Expired: ${num(expiredCount)}`,
+    `• Rates: Winrate ${winrate} | Direct SL Rate ${directSlRate}`,
     "",
-    "🧾 Since Created (D0→Now)",
-    `• Entry Hits: ${num(entryHits)}`,
-    `• Closed: ${num(closedCount)} (Win≥TP1 ${num(winCount)} | Direct SL ${num(directSlCount)} | Giveback ${num(givebackCount)})`,
+    "🧮 COHORT CHECK",
+    `• Created: ${num(createdCount)} | Active: ${num(activeCount)} | Closed: ${num(closedCount)} | Expired: ${num(expiredCount)}`,
     "",
-    "📋 Open List (Top 15)"
+    "📄 OPEN LIST"
   ];
 
-  if (list.length) {
-    for (const row of list) lines.push(`• ${row}`);
+  if (activeList.length) {
+    for (const row of activeList) lines.push(`• ${row}`);
+  } else {
+    lines.push("• None");
   }
 
-  if (moreCount > 0) {
-    lines.push(`... (+${moreCount} more)`);
+  if (moreActiveCount > 0) {
+    lines.push(`• ... (+${moreActiveCount} more)`);
   }
 
-  lines.push("━━━━━━━━━━━━━━━━━━");
-  lines.push("⚠️ Not Financial Advice");
+  lines.push("", "🧾 CLOSED LIST");
+
+  if (closedList.length) {
+    for (const row of closedList) lines.push(`• ${row}`);
+  } else {
+    lines.push("• None");
+  }
+
+  if (moreClosedCount > 0) {
+    lines.push(`• ... (+${moreClosedCount} more)`);
+  }
+
+  lines.push("", "───────────────────", "⚠️ Not Financial Advice");
   return lines.join("\n");
 }

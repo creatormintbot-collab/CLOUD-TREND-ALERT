@@ -12,40 +12,42 @@ function pct(a, b) {
 
 export function statusClosedCard({
   dateKey,
-  closedCount = 0,
   winCount = 0,
   directSlCount = 0,
-  givebackCount = 0,
+  expiredCount = 0,
   list = [],
   moreCount = 0
 } = {}) {
-  const closed = num(closedCount);
-  const winrate = pct(winCount, closed);
-  const slRate = pct(directSlCount, closed);
+  const tradingClosed = num(winCount) + num(directSlCount);
+  const winrate = pct(winCount, tradingClosed);
+  const slRate = pct(directSlCount, tradingClosed);
 
   const lines = [
-    "CLOUD TREND ALERT",
-    "━━━━━━━━━━━━━━━━━━",
-    "🎯 CLOSED TODAY (UTC)",
-    `📅 Date: ${dateKey}`,
+    "🤖 CLOUD TREND ALERT",
+    "───────────────────",
+    "🧾 STATUS CLOSED (UTC)",
+    `Day: ${dateKey} (UTC)`,
+    "Scope: This chat only (UTC)",
     "",
-    `✅ Closed: ${closed}`,
-    `• Win≥TP1: ${num(winCount)} | Direct SL: ${num(directSlCount)} | Giveback: ${num(givebackCount)}`
+    "✅ OUTCOMES",
+    `• Trading Closed: ${tradingClosed} (W ${num(winCount)} | L ${num(directSlCount)})`,
+    `• Expired: ${num(expiredCount)}`
   ];
 
   lines.push(`• Rates: Winrate ${winrate} | Direct SL Rate ${slRate}`);
 
-  lines.push("", "🧾 List (Top 15)");
+  lines.push("", "🧾 CLOSED LIST");
 
   if (list.length) {
     for (const row of list) lines.push(`• ${row}`);
+  } else {
+    lines.push("• None");
   }
 
   if (moreCount > 0) {
-    lines.push(`... (+${moreCount} more)`);
+    lines.push(`• ... (+${moreCount} more)`);
   }
 
-  lines.push("━━━━━━━━━━━━━━━━━━");
-  lines.push("⚠️ Not Financial Advice");
+  lines.push("", "───────────────────", "⚠️ Not Financial Advice");
   return lines.join("\n");
 }
