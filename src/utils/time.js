@@ -13,6 +13,12 @@ export function utcNowHHMM() {
   return `${h}:${m}`;
 }
 
+export function getUtcDayString(dateOrMs = Date.now()) {
+  const d = (dateOrMs instanceof Date) ? dateOrMs : new Date(dateOrMs);
+  if (Number.isNaN(d.getTime())) return utcDateKey();
+  return utcDateKey(d);
+}
+
 export function yesterdayUtcKey() {
   return utcDateKey(Date.now() - 86400000);
 }

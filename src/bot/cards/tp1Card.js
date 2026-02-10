@@ -27,8 +27,8 @@ export function tp1Card(pos) {
   const pb = resolvePlaybook(pos);
   const conf = confluenceActive(pos);
   return [
-    "CLOUD TREND ALERT",
-    "━━━━━━━━━━━━━━━━━━",
+    "🤖 CLOUD TREND ALERT",
+    "───────────────────",
     "✅ TP1 HIT — 25%",
     `🪙 Pair: ${pos.symbol}`,
     `Mode: ${modeLabel(pb)}`,

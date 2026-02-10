@@ -55,8 +55,8 @@ export function tradePlanCard(plan = {}) {
   const srLevels = Array.isArray(plan?.srLevels) ? plan.srLevels : [];
 
   const lines = [
-    "CLOUD TREND ALERT",
-    "━━━━━━━━━━━━━━━━━━",
+    "🤖 CLOUD TREND ALERT",
+    "───────────────────",
     `📌 TRADE PLAN — ${dot} ${dir}`,
     `🪙 Pair: ${sym}`,
     `Mode: ${modeLabel()}`,

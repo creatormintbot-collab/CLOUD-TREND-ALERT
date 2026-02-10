@@ -1,5 +1,7 @@
 // File: src/bot/cards/slCards.js
 import { fmtPrice } from "../../utils/format.js";
+import { logger } from "../../logger/logger.js";
+import { getMilestonesFromEvents } from "../../positions/outcomes.js";
 
 
 function resolvePlaybook(obj = {}) {
@@ -24,13 +26,27 @@ function confluenceActive(obj = {}) {
 }
 
 
-export function slCard(pos) {
+export function slCard(pos, events = []) {
   const pb = resolvePlaybook(pos);
   const conf = confluenceActive(pos);
-  if (pos.closeOutcome === "STOP_LOSS") {
+  const derived = getMilestonesFromEvents(events);
+  const tp2Hit = derived.tp2 || derived.tp3;
+  const tp1Hit = derived.tp1 || tp2Hit;
+
+  let chosenCopy = "before_tp1";
+  if (tp2Hit) chosenCopy = "after_tp2";
+  else if (tp1Hit) chosenCopy = "after_tp1";
+
+  logger.info("[SL_CARD] derived", {
+    positionId: pos?.id ?? events?.[0]?.positionId ?? null,
+    derived,
+    chosenCopy
+  });
+
+  if (!tp1Hit) {
     return [
-      "CLOUD TREND ALERT",
-      "━━━━━━━━━━━━━━━━━━",
+      "🤖 CLOUD TREND ALERT",
+      "───────────────────",
       "🛑 STOP LOSS HIT",
       `🪙 Pair: ${pos.symbol}`,
       `Mode: ${modeLabel(pb)}`,
@@ -54,10 +70,10 @@ export function slCard(pos) {
     ].join("\n");
   }
 
-  if (pos.closeOutcome === "STOP_LOSS_AFTER_TP1") {
+  if (!tp2Hit) {
     return [
-      "CLOUD TREND ALERT",
-      "━━━━━━━━━━━━━━━━━━",
+      "🤖 CLOUD TREND ALERT",
+      "───────────────────",
       "🛑 PRICE REVERSED — STOP LOSS HIT",
       `🪙 Pair: ${pos.symbol}`,
       `Mode: ${modeLabel(pb)}`,
@@ -78,8 +94,8 @@ export function slCard(pos) {
   }
 
   return [
-    "CLOUD TREND ALERT",
-    "━━━━━━━━━━━━━━━━━━",
+    "🤖 CLOUD TREND ALERT",
+    "───────────────────",
     "🛑 PRICE REVERSED — STOP LOSS HIT",
     `🪙 Pair: ${pos.symbol}`,
     `Mode: ${modeLabel(pb)}`,

@@ -263,6 +263,15 @@ export class Monitor {
           )
         : null;
 
+      let slEvents = null;
+      if (ev.event === "SL" && this.signalsRepo && typeof this.signalsRepo.getEventsByPositionId === "function") {
+        try {
+          slEvents = await this.signalsRepo.getEventsByPositionId({ positionId: pos.id });
+        } catch {
+          slEvents = null;
+        }
+      }
+
       for (const chatId of recipients) {
         const replyTo =
           pos?.telegram?.entryMessageIds?.[String(chatId)] ??
@@ -276,7 +285,7 @@ export class Monitor {
         if (ev.event === "TP1") await send(this.cards.tp1Card(pos));
         else if (ev.event === "TP2") await send(this.cards.tp2Card(pos));
         else if (ev.event === "TP3") await send(this.cards.tp3Card(pos));
-        else if (ev.event === "SL") await send(this.cards.slCard(pos));
+        else if (ev.event === "SL") await send(this.cards.slCard(pos, slEvents));
         else if (ev.event === "FILLED") {
           if (entryText) await send(entryText);
         }

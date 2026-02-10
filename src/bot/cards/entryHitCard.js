@@ -93,8 +93,8 @@ export function entryCard(s) {
   const bias = macro?.bias ?? macro?.BIAS ?? null;
 
   const lines = [
-    "CLOUD TREND ALERT",
-    "────────────────────────────────",
+    "🤖 CLOUD TREND ALERT",
+    "───────────────────",
     `🚀 FUTURES SIGNAL — ${dot} ${dir}`,
     `🌕 Pair: ${sym}`,
     `Mode: ${modeLabel(pb)}`,
@@ -139,8 +139,8 @@ export function entryHitCard(pos, price) {
   const conf = confluenceActive(pos);
   const dirEmoji = pos.direction === "LONG" ? "🟢" : "🔴";
   return [
-    "CLOUD TREND ALERT",
-    "━━━━━━━━━━━━━━━━━━",
+    "🤖 CLOUD TREND ALERT",
+    "───────────────────",
     `✅ ENTRY CONFIRMED — ${dirEmoji} ${pos.direction}`,
     `🪙 Pair: ${pos.symbol}`,
     `Mode: ${modeLabel(pb)}`,

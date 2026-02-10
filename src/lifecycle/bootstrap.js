@@ -46,7 +46,7 @@ import { recapCard } from "../bot/cards/recapCard.js";
 
 import { buildOverlays } from "../charts/layout.js";
 import { renderEntryChart } from "../charts/renderer.js";
-import { utcDateKey } from "../utils/time.js";
+import { getUtcDayString, utcDateKey } from "../utils/time.js";
 
 export async function bootstrap() {
   validateEnvOrThrow();
@@ -309,17 +309,45 @@ export async function bootstrap() {
       return;
     }
 
+    const utcDay = getUtcDayString();
+    const normSymbol = (s) => String(s || "").toUpperCase();
+    const normTfKey = (t) => String(t || "").toLowerCase();
+    const normSide = (s) => String(s || "").toUpperCase();
+    const buildSignalKey = (scopeId, sig) => (
+      `AUTO:${String(scopeId)}:${normSymbol(sig?.symbol)}:${normTfKey(sig?.tf)}:${normSide(sig?.direction || sig?.side)}:${utcDay}`
+    );
+
     let created = 0;
     let sent = 0;
 
     for (const sig of chosen) {
+      const symbol = normSymbol(sig?.symbol);
+      const tf = normTfKey(sig?.tf);
+      const side = normSide(sig?.direction || sig?.side);
+
+      const eligibleChatIds = [];
+      const signalKeys = [];
+
+      for (const scopeId of notifyChatIds) {
+        const signalKey = buildSignalKey(scopeId, sig);
+        const exists = await signalsRepo.hasSignalKey({ scopeId, utcDay, signalKey });
+        if (exists) {
+          logger.info("[AUTO_SCAN] skip_duplicate_signalKey", { signalKey, symbol, tf, side, utcDay, scopeId });
+          continue;
+        }
+        eligibleChatIds.push(scopeId);
+        signalKeys.push(signalKey);
+      }
+
+      if (!eligibleChatIds.length) continue;
+
       created += 1;
       const overlays = buildOverlays(sig);
       const png = await renderEntryChart(sig, overlays);
 
       const entryMessageIds = {};
 
-      for (const chatId of notifyChatIds) {
+      for (const chatId of eligibleChatIds) {
         await sender.sendPhoto(chatId, png);
         const msg = await sender.sendText(chatId, entryCard(sig));
         if (msg?.message_id) entryMessageIds[String(chatId)] = msg.message_id;
@@ -333,13 +361,21 @@ export async function bootstrap() {
 
       const pos = createPositionFromSignal(sig, {
         source: "AUTO",
-        notifyChatIds,
+        notifyChatIds: eligibleChatIds,
         telegram: Object.keys(entryMessageIds).length ? { entryMessageIds } : null
       });
       positionsRepo.upsert(pos);
 
       stateRepo.bumpAuto(sig.tf, sig.score, sig.macro.BTC_STATE);
-      await signalsRepo.logEntry({ source: "AUTO", signal: sig, meta: { publishedTo: notifyChatIds } });
+      await signalsRepo.logEntry({
+        source: "AUTO",
+        signal: sig,
+        meta: {
+          publishedTo: eligibleChatIds,
+          signalKey: signalKeys[0],
+          signalKeys: signalKeys.length > 1 ? signalKeys : undefined
+        }
+      });
     }
 
     stateRepo.markAutoCandle(triggerTf, lastClosed);

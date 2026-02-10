@@ -1,3 +1,4 @@
+import fs from "node:fs/promises";
 import path from "node:path";
 import { SIGNALS_DIR } from "../config/constants.js";
 import { utcDateKey } from "../utils/time.js";
@@ -15,6 +16,51 @@ function prevUtcDayKey(dayKey) {
   }
 }
 
+function normalizeSignalKey(value) {
+  if (typeof value !== "string") return "";
+  const k = value.trim();
+  return k || "";
+}
+
+function collectSignalKeys(ev) {
+  const keys = [];
+  if (!ev || typeof ev !== "object") return keys;
+  const primary = normalizeSignalKey(ev.signalKey);
+  if (primary) keys.push(primary);
+  const extra = ev.signalKeys;
+  if (Array.isArray(extra)) {
+    for (const k of extra) {
+      const nk = normalizeSignalKey(k);
+      if (nk) keys.push(nk);
+    }
+  }
+  return keys;
+}
+
+function normalizeScopeId(scopeId) {
+  const id = String(scopeId ?? "").trim();
+  return id || "";
+}
+
+function eventMatchesScope(ev, scopeId) {
+  const id = normalizeScopeId(scopeId);
+  if (!id || !ev) return true;
+
+  const chatId = ev.chatId ?? ev.chat_id ?? ev.chat;
+  if (chatId !== undefined && String(chatId) === id) return true;
+
+  const notify = ev.notifyChatIds || ev.notifyChats || ev.notifyChatId;
+  if (Array.isArray(notify) && notify.map(String).includes(id)) return true;
+
+  const published = ev.publishedTo || ev.published_to || ev.published;
+  if (Array.isArray(published) && published.map(String).includes(id)) return true;
+
+  const chats = ev.chatIds || ev.chats;
+  if (Array.isArray(chats) && chats.map(String).includes(id)) return true;
+
+  return false;
+}
+
 
 function derivePlaybookFromTf(tf) {
   const t = String(tf || "").toLowerCase();
@@ -29,6 +75,9 @@ export class SignalsRepo {
     this.data = { dateUTC: this.dayKey, events: [] };
     this._loaded = false;
     this._queue = Promise.resolve();
+    this._signalKeyIndex = new Map();
+    this._positionEventIndex = new Map();
+    this._positionIndexLoaded = false;
   }
 
   async _ensureLoaded(dayKey) {
@@ -39,7 +88,65 @@ export class SignalsRepo {
     this.data = await readJson(this.file, { dateUTC: this.dayKey, events: [] });
     if (!this.data?.events) this.data = { dateUTC: this.dayKey, events: [] };
 
+    this._indexSignalKeys(dayKey, this.data.events);
     this._loaded = true;
+  }
+
+  _indexSignalKeys(dayKey, events) {
+    const key = String(dayKey || "").trim();
+    if (!key) return null;
+    const set = new Set();
+    for (const ev of Array.isArray(events) ? events : []) {
+      for (const k of collectSignalKeys(ev)) set.add(k);
+    }
+    this._signalKeyIndex.set(key, set);
+    return set;
+  }
+
+  _addEventToPositionIndex(ev) {
+    if (!ev || typeof ev !== "object") return;
+    const pid = String(ev.positionId ?? "").trim();
+    if (!pid) return;
+    const list = this._positionEventIndex.get(pid) || [];
+    list.push(ev);
+    this._positionEventIndex.set(pid, list);
+  }
+
+  async _buildPositionIndexFromFiles() {
+    const map = new Map();
+    let files = [];
+    try {
+      files = await fs.readdir(SIGNALS_DIR);
+    } catch {
+      this._positionEventIndex = map;
+      this._positionIndexLoaded = true;
+      return;
+    }
+
+    const dayFiles = files
+      .filter((f) => f.startsWith("signals-") && f.endsWith(".json"))
+      .sort();
+
+    for (const fname of dayFiles) {
+      const file = path.join(SIGNALS_DIR, fname);
+      let data = null;
+      try {
+        data = await readJson(file, { dateUTC: "", events: [] });
+      } catch {
+        data = null;
+      }
+      const events = Array.isArray(data?.events) ? data.events : [];
+      for (const ev of events) {
+        const pid = String(ev?.positionId ?? "").trim();
+        if (!pid) continue;
+        const list = map.get(pid) || [];
+        list.push(ev);
+        map.set(pid, list);
+      }
+    }
+
+    this._positionEventIndex = map;
+    this._positionIndexLoaded = true;
   }
 
   _eventBase(source, meta) {
@@ -55,6 +162,13 @@ export class SignalsRepo {
   _pushAndPersist(ev) {
     this.data.events.push(ev);
     if (this.data.events.length > 8000) this.data.events = this.data.events.slice(-8000);
+    const keys = collectSignalKeys(ev);
+    if (keys.length) {
+      const set = this._signalKeyIndex.get(this.dayKey) || new Set();
+      for (const k of keys) set.add(k);
+      this._signalKeyIndex.set(this.dayKey, set);
+    }
+    this._addEventToPositionIndex(ev);
     return writeJsonAtomic(this.file, this.data);
   }
 
@@ -202,6 +316,19 @@ export class SignalsRepo {
     return data;
   }
 
+  async hasSignalKey({ scopeId, utcDay, signalKey }) {
+    const dayKey = String(utcDay || "").trim() || utcDateKey();
+    const key = normalizeSignalKey(signalKey);
+    if (!key) return false;
+
+    const cached = this._signalKeyIndex.get(dayKey);
+    if (cached) return cached.has(key);
+
+    const data = await this.readDay(dayKey);
+    const set = this._indexSignalKeys(dayKey, data?.events || []);
+    return set ? set.has(key) : false;
+  }
+
   async hasRecentEntry({ symbol, tf, withinMs = 0, nowMs = null }) {
     const s = String(symbol || "").toUpperCase();
     const t = String(tf || "").toLowerCase();
@@ -226,6 +353,28 @@ export class SignalsRepo {
       if (Number.isFinite(ts) && ts >= cutoff) return true;
     }
     return false;
+  }
+
+  async getEventsByPositionId({ scopeId, positionId, utcDay } = {}) {
+    const pid = String(positionId ?? "").trim();
+    if (!pid) return [];
+
+    await this._queue;
+
+    if (utcDay) {
+      const day = await this.readDay(utcDay);
+      const events = Array.isArray(day?.events) ? day.events : [];
+      return events.filter((ev) => String(ev?.positionId ?? "").trim() === pid && eventMatchesScope(ev, scopeId));
+    }
+
+    if (!this._positionIndexLoaded) {
+      await this._buildPositionIndexFromFiles();
+    }
+
+    const events = this._positionEventIndex.get(pid) || [];
+    if (!events.length) return [];
+    if (!normalizeScopeId(scopeId)) return events.slice();
+    return events.filter((ev) => eventMatchesScope(ev, scopeId));
   }
 
   async getDayStats(dayKey) {

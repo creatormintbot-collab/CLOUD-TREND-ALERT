@@ -1,3 +1,5 @@
+import { logger } from "../logger/logger.js";
+
 export function isWinOutcome(outcome) {
   const o = String(outcome || "").toUpperCase();
   if (!o) return false;
@@ -24,6 +26,45 @@ export const OUTCOME_CLASS = {
 
 function normTag(x) {
   return String(x || "").trim().toUpperCase();
+}
+
+function isLifecycleEvent(ev, name) {
+  const t = normTag(ev?.type);
+  if (t !== "LIFECYCLE") return false;
+  return normTag(ev?.event || ev?.name) === normTag(name);
+}
+
+function hasLifecycleEvent(events = [], name) {
+  for (const ev of Array.isArray(events) ? events : []) {
+    if (isLifecycleEvent(ev, name)) return true;
+  }
+  return false;
+}
+
+export function getMilestonesFromEvents(events = []) {
+  const out = { entryHit: false, tp1: false, tp2: false, tp3: false };
+  for (const ev of Array.isArray(events) ? events : []) {
+    if (!isLifecycleEvent(ev, "FILLED") && !isLifecycleEvent(ev, "TP1") && !isLifecycleEvent(ev, "TP2") && !isLifecycleEvent(ev, "TP3")) {
+      continue;
+    }
+    if (isLifecycleEvent(ev, "FILLED")) out.entryHit = true;
+    if (isLifecycleEvent(ev, "TP1")) {
+      out.entryHit = true;
+      out.tp1 = true;
+    }
+    if (isLifecycleEvent(ev, "TP2")) {
+      out.entryHit = true;
+      out.tp1 = true;
+      out.tp2 = true;
+    }
+    if (isLifecycleEvent(ev, "TP3")) {
+      out.entryHit = true;
+      out.tp1 = true;
+      out.tp2 = true;
+      out.tp3 = true;
+    }
+  }
+  return out;
 }
 
 function hasAny(str, needles = []) {
@@ -117,32 +158,50 @@ function flagsFromPos(pos) {
 }
 
 export function classifyOutcomeFromEvents(eventsForPosition = [], pos = null) {
-  const evFlags = flagsFromEvents(eventsForPosition);
   const posFlags = flagsFromPos(pos);
 
-  const flags = {
-    maxTpHit: Math.max(evFlags.maxTpHit, posFlags.maxTpHit),
-    hasTP1Plus: evFlags.hasTP1Plus || posFlags.hasTP1Plus,
-    hasSL: evFlags.hasSL || posFlags.hasSL,
-    hasEntry: evFlags.hasEntry || posFlags.hasEntry,
-    isExpired: evFlags.isExpired || posFlags.isExpired
-  };
-
-  if (flags.maxTpHit >= 1) flags.hasTP1Plus = true;
-  if (flags.hasTP1Plus) flags.hasEntry = true;
+  const derived = getMilestonesFromEvents(eventsForPosition);
+  const maxTpHit = derived.tp3 ? 3 : derived.tp2 ? 2 : derived.tp1 ? 1 : 0;
+  const hasTP1Plus = maxTpHit >= 1;
+  const hasSL = hasLifecycleEvent(eventsForPosition, "SL") || posFlags.hasSL;
+  const isExpired = hasLifecycleEvent(eventsForPosition, "EXPIRED") || posFlags.isExpired;
+  const hasEntry = derived.entryHit || posFlags.hasEntry;
 
   let outcomeType = OUTCOME_CLASS.OPEN_OR_UNKNOWN;
-  if (flags.isExpired && !flags.hasEntry) outcomeType = OUTCOME_CLASS.EXPIRED_NO_ENTRY;
-  else if (flags.hasSL && !flags.hasTP1Plus) outcomeType = OUTCOME_CLASS.LOSS_DIRECT_SL;
-  else if (flags.hasTP1Plus) outcomeType = OUTCOME_CLASS.WIN_TP1_PLUS;
+  let stopLossResult = null;
+  let reason = null;
+
+  if (isExpired && !hasEntry) outcomeType = OUTCOME_CLASS.EXPIRED_NO_ENTRY;
+  else if (hasSL) {
+    if (derived.tp2) {
+      stopLossResult = "STOP_LOSS_AFTER_TP2";
+      reason = "tp2_event";
+      outcomeType = OUTCOME_CLASS.WIN_TP1_PLUS;
+    } else if (derived.tp1) {
+      stopLossResult = "STOP_LOSS_AFTER_TP1";
+      reason = "tp1_event";
+      outcomeType = OUTCOME_CLASS.WIN_TP1_PLUS;
+    } else {
+      stopLossResult = "DIRECT_STOP_LOSS";
+      reason = "no_tp_events";
+      outcomeType = OUTCOME_CLASS.LOSS_DIRECT_SL;
+    }
+
+    logger.info("[OUTCOME] classify", {
+      positionId: pos?.id ?? eventsForPosition?.[0]?.positionId ?? null,
+      derived: { entry: derived.entryHit, tp1: derived.tp1, tp2: derived.tp2, tp3: derived.tp3 },
+      result: stopLossResult,
+      reason
+    });
+  } else if (hasTP1Plus) outcomeType = OUTCOME_CLASS.WIN_TP1_PLUS;
 
   return {
     outcomeType,
-    maxTpHit: flags.maxTpHit,
-    hasEntry: flags.hasEntry,
-    isExpired: flags.isExpired,
-    hasTP1Plus: flags.hasTP1Plus,
-    hasSL: flags.hasSL
+    maxTpHit,
+    hasEntry,
+    isExpired,
+    hasTP1Plus,
+    hasSL
   };
 }
 

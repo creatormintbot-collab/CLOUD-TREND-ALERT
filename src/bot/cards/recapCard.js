@@ -132,8 +132,8 @@ export function recapCard(x = {}) {
   const macroSummary = x.macroSummary || "BTC: N/A | ALTS: N/A | Bias: N/A";
 
   const lines = [
-    "CLOUD TREND ALERT",
-    "━━━━━━━━━━━━━━━━━━",
+    "🤖 CLOUD TREND ALERT",
+    "───────────────────",
     "🗓 DAILY FUTURES RECAP (UTC)",
     `Date: ${dateKey} (UTC)`,
     "",
