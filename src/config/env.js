@@ -18,6 +18,7 @@ function listNum(v) {
 export const env = {
   TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN || "",
   ALLOWED_GROUP_IDS: list(process.env.ALLOWED_GROUP_IDS).map(String),
+  ALLOWED_CHANNEL_IDS: list(process.env.ALLOWED_CHANNEL_IDS).map(String),
   TEST_SIGNALS_CHAT_ID: process.env.TEST_SIGNALS_CHAT_ID ? String(process.env.TEST_SIGNALS_CHAT_ID) : "",
   TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID ? String(process.env.TELEGRAM_CHAT_ID) : "",
 

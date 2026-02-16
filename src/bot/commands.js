@@ -145,6 +145,15 @@ function normalizeChatId(chatId) {
   return id || "";
 }
 
+function scanNotifyMeta(chatId, entryMsg) {
+  const id = String(chatId);
+  const msgId = entryMsg?.message_id;
+  return {
+    notifyChatIds: [id],
+    telegram: Number.isFinite(Number(msgId)) ? { entryMessageIds: { [id]: msgId } } : null
+  };
+}
+
 function positionMatchesChat(pos, chatId) {
   const id = normalizeChatId(chatId);
   if (!id || !pos) return false;
@@ -1345,10 +1354,7 @@ export class Commands {
             try {
               const pos = createPositionFromSignal(positionSignal, {
                 source: "SCAN",
-                notifyChatIds: [String(chatId)],
-                telegram: entryMsg?.message_id
-                  ? { entryMessageIds: { [String(chatId)]: entryMsg.message_id } }
-                  : null
+                ...scanNotifyMeta(chatId, entryMsg)
               });
 
               pos.createdAt = pos.createdAt || Date.now();
@@ -1693,10 +1699,7 @@ if (primaryDuplicatePos) {
       // create monitored position (notify only requester chat)
       const pos = createPositionFromSignal(res, {
         source: "SCAN",
-        notifyChatIds: [String(chatId)],
-        telegram: entryMsg?.message_id
-          ? { entryMessageIds: { [String(chatId)]: entryMsg.message_id } }
-          : null
+        ...scanNotifyMeta(chatId, entryMsg)
       });
 
       // Entry lifecycle normalization (non-breaking, but prevents false TP/SL before entry is filled)
@@ -1767,10 +1770,7 @@ if (primaryDuplicatePos) {
             // create monitored position (notify only requester chat)
             const pos2 = createPositionFromSignal(secondaryPick, {
               source: "SCAN",
-              notifyChatIds: [String(chatId)],
-              telegram: entryMsg2?.message_id
-                ? { entryMessageIds: { [String(chatId)]: entryMsg2.message_id } }
-                : null
+              ...scanNotifyMeta(chatId, entryMsg2)
             });
 
             pos2.createdAt = pos2.createdAt || Date.now();

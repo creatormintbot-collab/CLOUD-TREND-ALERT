@@ -1,14 +1,15 @@
 export class Sender {
-  constructor({ bot, allowedGroupIds = [] } = {}) {
+  constructor({ bot, allowedGroupIds = [], allowedChannelIds = [], allowDm = false } = {}) {
     this.bot = bot;
-    this.allowed = new Set((allowedGroupIds || []).map(String));
+    this.allowedGroups = new Set((allowedGroupIds || []).map(String));
+    this.allowedChannels = new Set((allowedChannelIds || []).map(String));
+    this.allowDm = !!allowDm;
   }
 
   _isAllowed(chatId) {
     const id = String(chatId);
-    // if allowed list empty -> allow all (dev mode)
-    if (this.allowed.size === 0) return true;
-    return this.allowed.has(id);
+    if (Number(chatId) > 0) return this.allowDm === true;
+    return this.allowedGroups.has(id) || this.allowedChannels.has(id);
   }
 
   // Ignore hard "no access" telegram errors so one dead chat doesn't break the whole AUTO run.

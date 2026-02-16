@@ -16,6 +16,8 @@ import { PositionsRepo } from "../storage/positionsRepo.js";
 import { RotationRepo } from "../storage/rotationRepo.js";
 import { SignalsRepo } from "../storage/signalsRepo.js";
 import { KlinesRepo } from "../storage/klinesRepo.js";
+import { DmSubscribersRepo } from "../storage/dmSubscribersRepo.js";
+import { ChatRegistryRepo } from "../storage/chatRegistryRepo.js";
 import { inc as incGroupStat } from "../storage/groupStatsRepo.js";
 
 import { Ranker } from "../selection/ranker.js";
@@ -38,6 +40,7 @@ import { createPositionFromSignal } from "../positions/positionModel.js";
 import { isWinOutcome, isDirectSL } from "../positions/outcomes.js";
 
 import { entryCard } from "../bot/cards/entryCard.js";
+import { entryHitCard } from "../bot/cards/entryHitCard.js";
 import { tp1Card } from "../bot/cards/tp1Card.js";
 import { tp2Card } from "../bot/cards/tp2Card.js";
 import { tp3Card } from "../bot/cards/tp3Card.js";
@@ -57,8 +60,16 @@ export async function bootstrap() {
   const rotationRepo = new RotationRepo({ cooldownMinutes: env.COOLDOWN_MINUTES });
   const signalsRepo = new SignalsRepo();
   const klinesRepo = new KlinesRepo();
+  const chatRegistryRepo = new ChatRegistryRepo();
+  const dmSubscribersRepo = new DmSubscribersRepo();
 
-  await Promise.all([stateRepo.load(), positionsRepo.load(), rotationRepo.load()]);
+  await Promise.all([
+    stateRepo.load(),
+    positionsRepo.load(),
+    rotationRepo.load(),
+    chatRegistryRepo.load(),
+    dmSubscribersRepo.load()
+  ]);
 
   const rest = new RestClient({
     baseUrl: env.BINANCE_FUTURES_REST,
@@ -126,7 +137,12 @@ export async function bootstrap() {
   const pipeline = new Pipeline({ universe, klines, ranker, thresholds, stateRepo, rotationRepo, env });
 
   const bot = startTelegram(env.TELEGRAM_BOT_TOKEN);
-  const sender = new Sender({ bot, allowedGroupIds: env.ALLOWED_GROUP_IDS });
+  const sender = new Sender({
+    bot,
+    allowedGroupIds: env.ALLOWED_GROUP_IDS,
+    allowedChannelIds: env.ALLOWED_CHANNEL_IDS,
+    allowDm: true
+  });
   const progressUi = new ProgressUi({ sender });
 
   const notifyChatIds = Array.from(
@@ -135,6 +151,56 @@ export async function bootstrap() {
 
   const commands = new Commands({ bot, sender, progressUi, pipeline, stateRepo, positionsRepo, signalsRepo, env });
   commands.bind();
+
+  const allowedGroupSet = new Set((env.ALLOWED_GROUP_IDS || []).map(String));
+  let botId = null;
+  try {
+    bot.getMe().then((me) => { botId = me?.id ?? null; }).catch(() => {});
+  } catch {}
+
+  const isGroupType = (type) => type === "group" || type === "supergroup";
+  const handleGroupJoin = (chat) => {
+    try { chatRegistryRepo.upsert(chat); } catch {}
+    const id = chat?.id;
+    if (id === undefined || id === null) return;
+    if (!allowedGroupSet.has(String(id))) {
+      try { Promise.resolve(bot.leaveChat(id)).catch(() => {}); } catch {}
+    }
+  };
+
+  bot.on("message", (msg) => {
+    try {
+      if (msg?.chat) chatRegistryRepo.upsert(msg.chat);
+    } catch {}
+
+    try {
+      if (msg?.chat?.type === "private") dmSubscribersRepo.add(msg.chat.id);
+    } catch {}
+
+    try {
+      const chat = msg?.chat;
+      if (!chat || !isGroupType(chat.type)) return;
+      const newMembers = Array.isArray(msg?.new_chat_members) ? msg.new_chat_members : [];
+      if (!newMembers.length) return;
+      const id = botId ?? bot?.botInfo?.id ?? bot?._botInfo?.id ?? null;
+      if (!id) return;
+      if (newMembers.some((m) => m?.id === id)) handleGroupJoin(chat);
+    } catch {}
+  });
+
+  bot.on("my_chat_member", (msg) => {
+    try {
+      const chat = msg?.chat;
+      if (!chat) return;
+      const status = msg?.new_chat_member?.status;
+      if (status !== "member" && status !== "administrator") return;
+      if (isGroupType(chat.type)) {
+        handleGroupJoin(chat);
+      } else {
+        chatRegistryRepo.upsert(chat);
+      }
+    } catch {}
+  });
 
   const server = startHealthServer({
     port: env.PORT,
@@ -152,7 +218,7 @@ export async function bootstrap() {
     stateRepo,
     signalsRepo,
     sender,
-    cards: { tp1Card, tp2Card, tp3Card, slCard }
+    cards: { entryHitCard, tp1Card, tp2Card, tp3Card, slCard }
   });
 
   const runAuto = async () => {
@@ -317,6 +383,12 @@ export async function bootstrap() {
       `AUTO:${String(scopeId)}:${normSymbol(sig?.symbol)}:${normTfKey(sig?.tf)}:${normSide(sig?.direction || sig?.side)}:${utcDay}`
     );
 
+    const autoTargets = Array.from(new Set([
+      ...notifyChatIds,
+      ...env.ALLOWED_CHANNEL_IDS,
+      ...dmSubscribersRepo.list()
+    ].filter(Boolean).map(String)));
+
     let created = 0;
     let sent = 0;
 
@@ -328,7 +400,7 @@ export async function bootstrap() {
       const eligibleChatIds = [];
       const signalKeys = [];
 
-      for (const scopeId of notifyChatIds) {
+      for (const scopeId of autoTargets) {
         const signalKey = buildSignalKey(scopeId, sig);
         const exists = await signalsRepo.hasSignalKey({ scopeId, utcDay, signalKey });
         if (exists) {

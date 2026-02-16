@@ -49,53 +49,6 @@ function inEntryZone(pos, price) {
   return p >= lo && p <= hi;
 }
 
-function entryHitCardText(pos, price) {
-  const dir = String(pos?.direction || pos?.side || "").toUpperCase() === "SHORT" ? "SHORT" : "LONG";
-  const dot = dir === "LONG" ? "🟢" : "🔴";
-
-  const tf = pos?.tf || "N/A";
-  const sym = pos?.symbol || "N/A";
-  const pb = String(pos?.playbook || (String(tf).toLowerCase() === "4h" ? "SWING" : "INTRADAY")).toUpperCase();
-  const mode = pb === "SWING" ? "Swing" : "Intraday";
-
-  const low = pos?.levels?.entryLow;
-  const high = pos?.levels?.entryHigh;
-  const mid = pos?.levels?.entryMid;
-
-  const sl = (pos?.slCurrent ?? pos?.levels?.sl);
-
-  const fmt = (v) => {
-    if (v === null || v === undefined) return "N/A";
-    const n = Number(v);
-    if (!Number.isFinite(n)) return String(v);
-    if (Math.abs(n) >= 1000) return n.toFixed(2);
-    if (Math.abs(n) >= 1) return n.toFixed(4);
-    return n.toFixed(4);
-  };
-
-  return [
-    "CLOUD TREND ALERT",
-    "────────────────────────────────",
-    `✅ ENTRY CONFIRMED — ${dot} ${dir}`,
-    `🌕 Pair: ${sym}`,
-    `⏱ Signal TF: ${tf}`,
-    `🧭 Mode: ${mode}`,
-    "",
-    "🎯 Entry Zone:",
-    `${fmt(low)} – ${fmt(high)}`,
-    "⚖️ Mid Entry:",
-    `${fmt(mid)}`,
-    "",
-    "📌 Mark Price:",
-    `${fmt(price)}`,
-    "",
-    "🛑 Stop Loss:",
-    `${fmt(sl)}`,
-    "",
-    "⚠️ Not Financial Advice",
-  ].join("\n");
-}
-
 export class Monitor {
   constructor({ rest, positionsRepo, stateRepo, signalsRepo, sender, cards }) {
     this.rest = rest;
@@ -259,7 +212,7 @@ export class Monitor {
         ? (
             (this.cards && typeof this.cards.entryHitCard === "function")
               ? this.cards.entryHitCard(pos, ev.price)
-              : entryHitCardText(pos, ev.price)
+              : null
           )
         : null;
 

@@ -1,68 +1,36 @@
-import "dotenv/config";
-import { env } from "../src/config/env.js";
-import { validateEnvOrThrow } from "../src/config/validate.js";
-import { RestClient } from "../src/exchange/restClient.js";
-import { WsManager } from "../src/exchange/wsManager.js";
-import { KlinesService } from "../src/exchange/klinesService.js";
-import { buildOverlays } from "../src/charts/layout.js";
-import { renderEntryChart } from "../src/charts/renderer.js";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { Sender } from "../src/bot/sender.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 async function main() {
-  validateEnvOrThrow();
-
-  const rest = new RestClient({
-    baseUrl: env.BINANCE_FUTURES_REST,
-    timeoutMs: env.REST_TIMEOUT_MS,
-    retryMax: env.REST_RETRY_MAX,
-    retryBaseMs: env.REST_RETRY_BASE_MS
+  const sender = new Sender({
+    bot: {},
+    allowedGroupIds: [],
+    allowedChannelIds: [],
+    allowDm: true
   });
 
-  console.log("[sanity] exchangeInfo...");
-  await rest.exchangeInfo();
+  if (!sender._isAllowed(12345)) {
+    throw new Error("DM should be allowed when allowDm=true");
+  }
+  if (sender._isAllowed(-100123)) {
+    throw new Error("Group/channel should be denied when allowlists are empty");
+  }
 
-  console.log("[sanity] premiumIndex BTCUSDT...");
-  const p = await rest.premiumIndex({ symbol: "BTCUSDT" });
-  console.log("[sanity] markPrice:", p?.markPrice);
+  const monitorPath = path.join(__dirname, "..", "src", "positions", "monitor.js");
+  const monitorSrc = await fs.readFile(monitorPath, "utf8");
+  if (monitorSrc.includes("entryHitCardText")) {
+    throw new Error("monitor.js still contains entryHitCardText fallback");
+  }
 
-  const ws = new WsManager({
-    wsBase: env.BINANCE_FUTURES_WS,
-    maxStreamsPerSocket: env.WS_MAX_STREAMS_PER_SOCKET,
-    backoffBaseMs: env.WS_BACKOFF_BASE_MS,
-    backoffMaxMs: env.WS_BACKOFF_MAX_MS
-  });
-
-  const klines = new KlinesService({ rest, wsManager: ws, backfillLimit: 300, maxCandles: 800 });
-
-  console.log("[sanity] backfill BTCUSDT 15m...");
-  await klines.backfill(["BTCUSDT"], ["15m"]);
-  const candles = klines.getCandles("BTCUSDT", "15m");
-  console.log("[sanity] candles:", candles.length, "lastClose:", candles.at(-1)?.closeTime);
-
-  const last = candles.at(-1)?.close || 0;
-  const fakeSignal = {
-    symbol: "BTCUSDT",
-    tf: "15m",
-    levels: {
-      entryLow: last * 0.999,
-      entryHigh: last * 1.001,
-      entryMid: last,
-      sl: last * 0.995,
-      tp1: last * 1.005,
-      tp2: last * 1.01,
-      tp3: last * 1.02
-    },
-    candles
-  };
-
-  const overlays = buildOverlays(fakeSignal);
-  const png = await renderEntryChart(fakeSignal, overlays, "sanity");
-  console.log("[sanity] png bytes:", png.length);
-
-  await ws.stop();
   console.log("[sanity] OK");
 }
 
-main().catch((e) => {
-  console.error("[sanity] FAIL:", e);
+main().catch((err) => {
+  console.error("[sanity] FAIL:", err.message || err);
   process.exit(1);
 });
