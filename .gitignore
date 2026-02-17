@@ -9,6 +9,7 @@ node_modules/
 
 # runtime data (DO NOT COMMIT)
 data/*.json
+data/position.json
 data/groups/
 data/klines/**
 

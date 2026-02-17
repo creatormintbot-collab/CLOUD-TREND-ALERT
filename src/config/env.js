@@ -21,6 +21,12 @@ export const env = {
   ALLOWED_CHANNEL_IDS: list(process.env.ALLOWED_CHANNEL_IDS).map(String),
   TEST_SIGNALS_CHAT_ID: process.env.TEST_SIGNALS_CHAT_ID ? String(process.env.TEST_SIGNALS_CHAT_ID) : "",
   TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID ? String(process.env.TELEGRAM_CHAT_ID) : "",
+  REQUIRED_SUBSCRIBE_CHANNEL_ID: process.env.REQUIRED_SUBSCRIBE_CHANNEL_ID ? String(process.env.REQUIRED_SUBSCRIBE_CHANNEL_ID) : "",
+  REQUIRED_SUBSCRIBE_CHANNEL_URL: process.env.REQUIRED_SUBSCRIBE_CHANNEL_URL || "https://t.me/cloud_trend",
+  DM_SCAN_MAX_PER_DAY: num(process.env.DM_SCAN_MAX_PER_DAY, 5),
+  PREMIUM_USER_IDS: list(process.env.PREMIUM_USER_IDS).map(String),
+  ADMIN_USER_IDS: list(process.env.ADMIN_USER_IDS).map(String),
+  SUBSCRIBE_USDT_ADDRESS: process.env.SUBSCRIBE_USDT_ADDRESS || "",
 
   BINANCE_FUTURES_REST: process.env.BINANCE_FUTURES_REST || "https://fapi.binance.com",
   BINANCE_FUTURES_WS: process.env.BINANCE_FUTURES_WS || "wss://fstream.binance.com/stream",

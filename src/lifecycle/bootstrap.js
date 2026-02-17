@@ -50,6 +50,7 @@ import { recapCard } from "../bot/cards/recapCard.js";
 import { buildOverlays } from "../charts/layout.js";
 import { renderEntryChart } from "../charts/renderer.js";
 import { getUtcDayString, utcDateKey } from "../utils/time.js";
+import { sleep } from "../utils/sleep.js";
 
 export async function bootstrap() {
   validateEnvOrThrow();
@@ -149,7 +150,17 @@ export async function bootstrap() {
     new Set([env.TELEGRAM_CHAT_ID, env.TEST_SIGNALS_CHAT_ID, ...env.ALLOWED_GROUP_IDS].filter(Boolean).map(String))
   );
 
-  const commands = new Commands({ bot, sender, progressUi, pipeline, stateRepo, positionsRepo, signalsRepo, env });
+  const commands = new Commands({
+    bot,
+    sender,
+    progressUi,
+    pipeline,
+    stateRepo,
+    positionsRepo,
+    signalsRepo,
+    env,
+    dmSubscribersRepo
+  });
   commands.bind();
 
   const allowedGroupSet = new Set((env.ALLOWED_GROUP_IDS || []).map(String));
@@ -159,6 +170,94 @@ export async function bootstrap() {
   } catch {}
 
   const isGroupType = (type) => type === "group" || type === "supergroup";
+  const dmFollowStatuses = new Set(["creator", "administrator", "member"]);
+  const requiredSubscribeChannelId = String(env.REQUIRED_SUBSCRIBE_CHANNEL_ID || "").trim();
+  const dmEligibilityBatchSize = 15;
+  const dmEligibilityBatchSleepMs = 150;
+  const dmRetryAfterSeconds = (err) => {
+    const body = err?.response?.body;
+    const vals = [
+      Number(body?.parameters?.retry_after),
+      Number(body?.retry_after),
+      Number(err?.parameters?.retry_after),
+      Number(err?.retry_after)
+    ];
+
+    for (const v of vals) {
+      if (Number.isFinite(v) && v > 0) return Math.floor(v);
+    }
+
+    const text = String(body?.description || err?.message || "");
+    const m = text.match(/retry after\s+(\d+)/i);
+    if (m && Number.isFinite(Number(m[1]))) return Math.floor(Number(m[1]));
+    return 1;
+  };
+  const dmIsRateLimitErr = (err) => {
+    const status = Number(err?.response?.statusCode || err?.statusCode);
+    const errorCode = Number(err?.response?.body?.error_code);
+    if (status === 429 || errorCode === 429) return true;
+    return /\b429\b/.test(String(err?.message || err?.response?.body?.description || ""));
+  };
+  const checkDmFollowerEligibility = async (chatId) => {
+    const memberUserId = Number(chatId);
+    if (!Number.isFinite(memberUserId)) return false;
+
+    const fetchStatus = async () => {
+      const member = await bot.getChatMember(requiredSubscribeChannelId, memberUserId);
+      const status = String(member?.status || "").toLowerCase();
+      return dmFollowStatuses.has(status);
+    };
+
+    try {
+      return await fetchStatus();
+    } catch (err) {
+      if (!dmIsRateLimitErr(err)) return false;
+      await sleep(Math.max(1, dmRetryAfterSeconds(err)) * 1000);
+      try {
+        return await fetchStatus();
+      } catch {
+        return false;
+      }
+    }
+  };
+
+  const listEligibleDmSubscribers = async () => {
+    const list = dmSubscribersRepo.list();
+    if (!requiredSubscribeChannelId || !list.length) return list;
+
+    const utcDayKey = utcDateKey();
+    const allowed = [];
+    const pendingCheck = [];
+
+    for (const chatId of list) {
+      const cached = dmSubscribersRepo.getEligibilityForUtcDay(chatId, utcDayKey);
+      if (cached.known) {
+        if (cached.eligible) allowed.push(chatId);
+        continue;
+      }
+      pendingCheck.push(chatId);
+    }
+
+    for (let i = 0; i < pendingCheck.length; i += dmEligibilityBatchSize) {
+      const batch = pendingCheck.slice(i, i + dmEligibilityBatchSize);
+
+      const batchResults = await Promise.all(batch.map(async (chatId) => {
+        const eligible = await checkDmFollowerEligibility(chatId);
+        try { dmSubscribersRepo.setEligibilityForUtcDay(chatId, utcDayKey, eligible); } catch {}
+        return eligible ? chatId : null;
+      }));
+
+      for (const item of batchResults) {
+        if (item) allowed.push(item);
+      }
+
+      if ((i + dmEligibilityBatchSize) < pendingCheck.length) {
+        await sleep(dmEligibilityBatchSleepMs);
+      }
+    }
+
+    return allowed;
+  };
   const handleGroupJoin = (chat) => {
     try { chatRegistryRepo.upsert(chat); } catch {}
     const id = chat?.id;
@@ -171,10 +270,6 @@ export async function bootstrap() {
   bot.on("message", (msg) => {
     try {
       if (msg?.chat) chatRegistryRepo.upsert(msg.chat);
-    } catch {}
-
-    try {
-      if (msg?.chat?.type === "private") dmSubscribersRepo.add(msg.chat.id);
     } catch {}
 
     try {
@@ -386,7 +481,7 @@ export async function bootstrap() {
     const autoTargets = Array.from(new Set([
       ...notifyChatIds,
       ...env.ALLOWED_CHANNEL_IDS,
-      ...dmSubscribersRepo.list()
+      ...(await listEligibleDmSubscribers())
     ].filter(Boolean).map(String)));
 
     let created = 0;

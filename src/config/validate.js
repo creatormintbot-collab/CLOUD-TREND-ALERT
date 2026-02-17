@@ -107,4 +107,21 @@ export function validateEnvOrThrow() {
   if (!Number.isFinite(env.ENTRY_CONFIRM_MAX_WAIT_MS) || Number(env.ENTRY_CONFIRM_MAX_WAIT_MS) < 0) {
     throw new Error("ENTRY_CONFIRM_MAX_WAIT_MS must be a finite number >= 0");
   }
+
+  if (!Number.isFinite(env.DM_SCAN_MAX_PER_DAY) || Number(env.DM_SCAN_MAX_PER_DAY) < 0) {
+    throw new Error("DM_SCAN_MAX_PER_DAY must be a finite number >= 0");
+  }
+
+  if (!String(env.REQUIRED_SUBSCRIBE_CHANNEL_ID || "").trim()) {
+    throw new Error("REQUIRED_SUBSCRIBE_CHANNEL_ID must be non-empty");
+  }
+
+  if (Array.isArray(env.ADMIN_USER_IDS) && env.ADMIN_USER_IDS.length) {
+    const badAdminIds = env.ADMIN_USER_IDS
+      .map((id) => String(id || "").trim())
+      .filter((id) => !/^\d+$/.test(id));
+    if (badAdminIds.length) {
+      throw new Error(`ADMIN_USER_IDS contains invalid telegram user id(s): ${badAdminIds.join(", ")}`);
+    }
+  }
 }

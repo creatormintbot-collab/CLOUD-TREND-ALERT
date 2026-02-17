@@ -9,7 +9,15 @@ import { buildOverlays } from "../charts/layout.js";
 import { renderEntryChart } from "../charts/renderer.js";
 import { createPositionFromSignal } from "../positions/positionModel.js";
 import { classifyOutcomeFromEvents, OUTCOME_CLASS } from "../positions/outcomes.js";
-import { inc as incGroupStat, readDay as readGroupStatsDay } from "../storage/groupStatsRepo.js";
+import { inc as incGroupStat, readDay as readGroupStatsDay, consumeDailyQuota } from "../storage/groupStatsRepo.js";
+import { get as getDmFlowState, set as setDmFlowState, clear as clearDmFlowState } from "../storage/dmFlowRepo.js";
+import {
+  setPending as setPendingSubscription,
+  approve as approveSubscription,
+  isPremiumActive as isSubscriptionPremiumActive,
+  getExpiry as getSubscriptionExpiry
+} from "../storage/subscriptionsRepo.js";
+import { runPremiumScan } from "../scan/premiumScan.js";
 import { INTRADAY_COOLDOWN_MINUTES } from "../config/constants.js";
 
 function mapIntradayPlanToSignal(plan = {}) {
@@ -572,8 +580,180 @@ function formatDuplicateNotice({ symbol, tf, pos }) {
   ].join("\n");
 }
 
+const DM_START_MENU_TEXT = [
+  "CLOUD TREND ALERT",
+  "━━━━━━━━━━━━━━━━━━",
+  "Hey! Quick thing — to use this bot in DM, please follow our channel first.",
+  "After that, you’ll be able to use /scan, /status, and more."
+].join("\n");
+
+const DM_NOT_FOLLOWED_BLOCK_TEXT = [
+  "CLOUD TREND ALERT",
+  "━━━━━━━━━━━━━━━━━━",
+  "You’re almost in — please follow our channel first to unlock DM features.",
+  "",
+  "Tap “Follow Channel”, then come back and hit “Check Access”."
+].join("\n");
+
+const DM_ACCESS_GRANTED_TEXT = [
+  "✅ Access granted!",
+  "Try /scan or /status whenever you’re ready."
+].join("\n");
+
+const DM_STILL_NOT_DETECTED_TEXT = [
+  "CLOUD TREND ALERT",
+  "━━━━━━━━━━━━━━━━━━",
+  "Hmm, I still can’t see you as a member yet.",
+  "",
+  "Please make sure you joined the channel, then tap “Check Access” again."
+].join("\n");
+
+const DM_PLAN_PICKER_TEXT = [
+  "CLOUD TREND ALERT",
+  "━━━━━━━━━━━━━━━━━━",
+  "Pick your plan 👇",
+  "Premium = unlimited DM scans + you can use the bot in your group (after admin approval)."
+].join("\n");
+
+const DM_CONFIRM_ASK_TXID_TEXT = "Cool — please send your TXID here (just paste it as a message).";
+const DM_PAYMENT_UNAVAILABLE_TEXT = "Payment is temporarily unavailable. Please try again later.";
+
+const DM_FOLLOW_ALLOWED_STATUSES = new Set(["creator", "administrator", "member"]);
+const DM_PLAN_BY_MONTHS = {
+  1: { planMonths: 1, priceUsd: 10, planLabel: "1 Month — $10" },
+  6: { planMonths: 6, priceUsd: 45, planLabel: "6 Months — $45" },
+  12: { planMonths: 12, priceUsd: 60, planLabel: "12 Months — $60" }
+};
+
+function dmPlanMetaFromMonths(months) {
+  const key = Number(months);
+  return DM_PLAN_BY_MONTHS[key] || null;
+}
+
+function dmPlanMetaFromState(state) {
+  const meta = dmPlanMetaFromMonths(state?.planMonths);
+  if (!meta) return null;
+  const price = Number(state?.priceUsd);
+  if (Number.isFinite(price) && price !== Number(meta.priceUsd)) return null;
+  return meta;
+}
+
+function dmStartMenuKeyboard(url) {
+  return {
+    inline_keyboard: [
+      [{ text: "Follow Channel", url }],
+      [{ text: "I’ve Followed — Check Access", callback_data: "DM:CHECK" }],
+      [{ text: "Subscribe", callback_data: "DM:SUB" }]
+    ]
+  };
+}
+
+function dmSubscribePlansKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: "1 Month — $10", callback_data: "DM:PLAN:1" }],
+      [{ text: "6 Months — $45", callback_data: "DM:PLAN:6" }],
+      [{ text: "12 Months — $60", callback_data: "DM:PLAN:12" }]
+    ]
+  };
+}
+
+function dmConfirmKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: "Confirm", callback_data: "DM:CONFIRM" }]
+    ]
+  };
+}
+
+function dmScanLimitKeyboard(url) {
+  return {
+    inline_keyboard: [
+      [{ text: "Subscribe", callback_data: "DM:SUB" }],
+      [
+        { text: "Follow Channel", url },
+        { text: "I’ve Followed — Check Access", callback_data: "DM:CHECK" }
+      ]
+    ]
+  };
+}
+
+function formatDmPaymentInstruction({ amount, plan, usdtAddress }) {
+  return [
+    "CLOUD TREND ALERT",
+    "━━━━━━━━━━━━━━━━━━",
+    "Awesome — here’s how to pay:",
+    "",
+    `Amount: ${amount} USDT`,
+    `Plan: ${plan}`,
+    "Send to this wallet address:",
+    usdtAddress,
+    "",
+    "After you’ve paid, tap “Confirm” and send your TXID."
+  ].join("\n");
+}
+
+function formatDmUserTxidReceived({ userId, username, plan, txid, utcIso }) {
+  return [
+    "✅ Got it!",
+    "",
+    "Here are your details:",
+    `User ID: ${userId}`,
+    `Username: @${username}`,
+    `Plan: ${plan}`,
+    `TXID: ${txid}`,
+    `Time (UTC): ${utcIso}`,
+    "",
+    "Next step:",
+    "Please message the admin and send: User ID + TXID",
+    "Once verified, your Premium will be unlocked."
+  ].join("\n");
+}
+
+function formatDmAdminNotify({ userId, username, plan, amount, txid, utcIso, approveCommand }) {
+  return [
+    "🧾 NEW PREMIUM PAYMENT SUBMITTED",
+    "",
+    `User ID: ${userId}`,
+    `Username: @${username}`,
+    `Plan: ${plan}`,
+    `Amount: ${amount} USDT`,
+    `TXID: ${txid}`,
+    `Time (UTC): ${utcIso}`,
+    "",
+    "Copy to approve:",
+    ` ${approveCommand}`,
+    "",
+    "Action:",
+    "Verify payment, then approve using the command above."
+  ].join("\n");
+}
+
+function formatDmPremiumUnlockedUserText({ expiresAtUtc }) {
+  return [
+    "✅ Premium unlocked!",
+    "",
+    "Your Premium is active until:",
+    `${expiresAtUtc} (UTC)`,
+    "",
+    "You now have unlimited DM scans.",
+    "For group access, send your Group ID to the admin."
+  ].join("\n");
+}
+
+function formatDmScanLimitReached({ used, max }) {
+  return [
+    "CLOUD TREND ALERT",
+    "━━━━━━━━━━━━━━━━━━",
+    "⚠️ Daily DM Scan Limit Reached (Free)",
+    "",
+    `You’ve used ${used}/${max} scans today (UTC).`,
+    "Want unlimited scans + group access? Tap “Subscribe”."
+  ].join("\n");
+}
+
 export class Commands {
-  constructor({ bot, sender, progressUi, pipeline, stateRepo, positionsRepo, signalsRepo, env }) {
+  constructor({ bot, sender, progressUi, pipeline, stateRepo, positionsRepo, signalsRepo, env, dmSubscribersRepo = null }) {
     this.bot = bot;
     this.sender = sender;
     this.progressUi = progressUi;
@@ -582,10 +762,280 @@ export class Commands {
     this.positionsRepo = positionsRepo;
     this.signalsRepo = signalsRepo;
     this.env = env;
+    this.dmSubscribersRepo = dmSubscribersRepo;
+    this._bound = false;
+  }
+
+  _isPrivateChat(chat) {
+    return String(chat?.type || "").toLowerCase() === "private";
+  }
+
+  _subscribeChannelUrl() {
+    const raw = String(this.env?.REQUIRED_SUBSCRIBE_CHANNEL_URL || "https://t.me/cloud_trend").trim();
+    return raw || "https://t.me/cloud_trend";
+  }
+
+  async _sendBotText(chatId, text, options = {}) {
+    try {
+      return await this.bot.sendMessage(chatId, text, {
+        disable_web_page_preview: true,
+        ...options
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  async _sendDmStartMenu(chatId, text = DM_START_MENU_TEXT) {
+    return this._sendBotText(chatId, text, {
+      reply_markup: dmStartMenuKeyboard(this._subscribeChannelUrl())
+    });
+  }
+
+  async ensureDmAccess(msg, { silent = false } = {}) {
+    if (!this._isPrivateChat(msg?.chat)) return true;
+
+    const requiredChannelId = String(this.env?.REQUIRED_SUBSCRIBE_CHANNEL_ID || "").trim();
+    if (!requiredChannelId) return true;
+
+    const userId = msg?.from?.id;
+    if (userId === undefined || userId === null) {
+      if (!silent) await this._sendDmStartMenu(msg?.chat?.id, DM_NOT_FOLLOWED_BLOCK_TEXT);
+      return false;
+    }
+
+    try {
+      const member = await this.bot.getChatMember(requiredChannelId, userId);
+      const status = String(member?.status || "").toLowerCase();
+      if (DM_FOLLOW_ALLOWED_STATUSES.has(status)) {
+        try { this.dmSubscribersRepo?.add?.(msg?.chat?.id); } catch {}
+        return true;
+      }
+    } catch {}
+
+    if (!silent) await this._sendDmStartMenu(msg?.chat?.id, DM_NOT_FOLLOWED_BLOCK_TEXT);
+    return false;
   }
 
   bind() {
+    if (this._bound) return;
+    this._bound = true;
+
+    this.bot.onText(/^\/start\b/i, async (msg) => {
+      if (!this._isPrivateChat(msg?.chat)) return;
+      await this._sendDmStartMenu(msg.chat.id, DM_START_MENU_TEXT);
+    });
+
+    this.bot.on("callback_query", async (callbackQuery) => {
+      try {
+        await this.bot.answerCallbackQuery(callbackQuery?.id).catch(() => {});
+      } catch {}
+
+      const data = String(callbackQuery?.data || "");
+      if (!data.startsWith("DM:")) return;
+
+      const msg = callbackQuery?.message;
+      if (!this._isPrivateChat(msg?.chat)) return;
+
+      const chatId = msg?.chat?.id;
+      const userId = callbackQuery?.from?.id;
+      if (chatId === undefined || chatId === null || userId === undefined || userId === null) return;
+
+      if (data === "DM:CHECK") {
+        const allowed = await this.ensureDmAccess({
+          chat: msg.chat,
+          from: callbackQuery.from
+        }, { silent: true });
+
+        if (allowed) {
+          await this._sendBotText(chatId, DM_ACCESS_GRANTED_TEXT);
+        } else {
+          await this._sendDmStartMenu(chatId, DM_STILL_NOT_DETECTED_TEXT);
+        }
+        return;
+      }
+
+      if (data === "DM:SUB") {
+        await this._sendBotText(chatId, DM_PLAN_PICKER_TEXT, {
+          reply_markup: dmSubscribePlansKeyboard()
+        });
+        return;
+      }
+
+      const planMatch = data.match(/^DM:PLAN:(1|6|12)$/);
+      if (planMatch) {
+        const meta = dmPlanMetaFromMonths(Number(planMatch[1]));
+        if (!meta) return;
+
+        const usdtAddress = String(this.env?.SUBSCRIBE_USDT_ADDRESS || "").trim();
+        if (!usdtAddress) {
+          await this._sendBotText(chatId, DM_PAYMENT_UNAVAILABLE_TEXT);
+          return;
+        }
+
+        await setDmFlowState(userId, {
+          stage: "PLAN_SELECTED",
+          planMonths: meta.planMonths,
+          priceUsd: meta.priceUsd,
+          updatedAtUtc: new Date().toISOString()
+        }).catch(() => null);
+
+        await this._sendBotText(chatId, formatDmPaymentInstruction({
+          amount: meta.priceUsd,
+          plan: meta.planLabel,
+          usdtAddress
+        }), {
+          reply_markup: dmConfirmKeyboard()
+        });
+        return;
+      }
+
+      if (data === "DM:CONFIRM") {
+        const current = await getDmFlowState(userId).catch(() => null);
+        const meta = dmPlanMetaFromState(current);
+        if (!meta) {
+          await this._sendBotText(chatId, DM_PLAN_PICKER_TEXT, {
+            reply_markup: dmSubscribePlansKeyboard()
+          });
+          return;
+        }
+
+        await setDmFlowState(userId, {
+          stage: "AWAITING_TXID",
+          planMonths: meta.planMonths,
+          priceUsd: meta.priceUsd,
+          updatedAtUtc: new Date().toISOString()
+        }).catch(() => null);
+
+        await this._sendBotText(chatId, DM_CONFIRM_ASK_TXID_TEXT);
+      }
+    });
+
+    this.bot.on("message", async (msg) => {
+      if (!this._isPrivateChat(msg?.chat)) return;
+
+      const text = typeof msg?.text === "string" ? msg.text.trim() : "";
+      if (!text || text.startsWith("/")) return;
+
+      const userId = msg?.from?.id;
+      if (userId === undefined || userId === null) return;
+
+      const state = await getDmFlowState(userId).catch(() => null);
+      if (!state || state.stage !== "AWAITING_TXID") return;
+
+      const txid = text.trim();
+      if (txid.length < 8 || /\s/.test(txid)) {
+        await this._sendBotText(msg?.chat?.id, "Invalid TXID, please paste again.");
+        return;
+      }
+
+      const meta = dmPlanMetaFromState(state);
+      if (!meta) {
+        await clearDmFlowState(userId).catch(() => false);
+        return;
+      }
+
+      const utcIso = new Date().toISOString();
+      await setPendingSubscription({
+        userId: String(userId),
+        planMonths: meta.planMonths,
+        priceUsd: meta.priceUsd,
+        txid,
+        requestedAtUtc: utcIso
+      }).catch(() => null);
+
+      const username = String(msg?.from?.username || "na").trim() || "na";
+      const userChatId = msg?.chat?.id;
+      const userSummary = formatDmUserTxidReceived({
+        userId: String(userId),
+        username,
+        plan: meta.planLabel,
+        txid,
+        utcIso
+      });
+
+      if (userChatId !== undefined && userChatId !== null) {
+        await this._sendBotText(userChatId, userSummary);
+      }
+
+      const approveCommand = `/approve ${String(userId)} ${meta.planMonths}`;
+      const adminNotify = formatDmAdminNotify({
+        userId: String(userId),
+        username,
+        plan: meta.planLabel,
+        amount: meta.priceUsd,
+        txid,
+        utcIso,
+        approveCommand
+      });
+
+      const adminIds = Array.from(new Set(
+        (Array.isArray(this.env?.ADMIN_USER_IDS) ? this.env.ADMIN_USER_IDS : [])
+          .map((id) => String(id || "").trim())
+          .filter((id) => /^\d+$/.test(id))
+      ));
+
+      await Promise.all(
+        adminIds.map((adminId) => this._sendBotText(adminId, adminNotify))
+      ).catch(() => {});
+
+      await clearDmFlowState(userId).catch(() => false);
+    });
+
+    this.bot.onText(/^\/approve\b(?:\s+(\d+)\s+(1|6|12))?/i, async (msg, match) => {
+      const senderId = String(msg?.from?.id || "").trim();
+      const adminIds = new Set(
+        (Array.isArray(this.env?.ADMIN_USER_IDS) ? this.env.ADMIN_USER_IDS : [])
+          .map((id) => String(id || "").trim())
+          .filter((id) => /^\d+$/.test(id))
+      );
+
+      if (!senderId || !adminIds.has(senderId)) return;
+
+      const targetUserId = String(match?.[1] || "").trim();
+      const months = Number(match?.[2]);
+      if (!targetUserId || ![1, 6, 12].includes(months)) {
+        await this._sendBotText(msg.chat.id, "Usage: /approve <userId> <months>");
+        return;
+      }
+
+      const now = new Date();
+      const expiresAt = new Date(now.getTime());
+      expiresAt.setUTCMonth(expiresAt.getUTCMonth() + months);
+
+      const approvedAtUtc = now.toISOString();
+      const expiresAtUtc = expiresAt.toISOString();
+
+      const approved = await approveSubscription({
+        userId: targetUserId,
+        planMonths: months,
+        approvedBy: senderId,
+        approvedAtUtc,
+        expiresAtUtc
+      }).catch(() => null);
+
+      if (!approved) {
+        await this._sendBotText(msg.chat.id, "Approve failed. Try again.");
+        return;
+      }
+
+      const activeExpiry = await getSubscriptionExpiry(targetUserId).catch(() => null);
+      const finalExpiry = String(activeExpiry || approved.expiresAtUtc || expiresAtUtc);
+
+      await this._sendBotText(targetUserId, formatDmPremiumUnlockedUserText({
+        expiresAtUtc: finalExpiry
+      }));
+
+      await this._sendBotText(msg.chat.id, [
+        "Premium unlocked.",
+        `User ID: ${targetUserId}`,
+        `Months: ${months}`,
+        `Expires At (UTC): ${finalExpiry}`
+      ].join("\n"));
+    });
+
     this.bot.onText(/^\/help\b/i, async (msg) => {
+      if (!(await this.ensureDmAccess(msg))) return;
       await this.sender.sendText(
         msg.chat.id,
         [
@@ -608,6 +1058,7 @@ export class Commands {
     });
 
     this.bot.onText(/^\/top\b/i, async (msg) => {
+      if (!(await this.ensureDmAccess(msg))) return;
       const dateKey = utcDateKeyNow();
 
       let rows = [];
@@ -623,6 +1074,7 @@ export class Commands {
 
 
     this.bot.onText(/^\/status\b/i, async (msg) => {
+      if (!(await this.ensureDmAccess(msg))) return;
       const chatId = msg.chat.id;
       const dateKey = utcDateKeyNow();
       const timeKey = utcTimeNow();
@@ -691,6 +1143,7 @@ export class Commands {
     });
 
     this.bot.onText(/^\/statusopen\b/i, async (msg) => {
+      if (!(await this.ensureDmAccess(msg))) return;
       const dateKey = utcDateKeyNow();
       const timeKey = utcTimeNow();
       const scopeKey = msg.chat.id;
@@ -727,6 +1180,7 @@ export class Commands {
     });
 
     this.bot.onText(/^\/statusclosed\b/i, async (msg) => {
+      if (!(await this.ensureDmAccess(msg))) return;
       const dateKey = utcDateKeyNow();
       const scopeKey = msg.chat.id;
 
@@ -774,6 +1228,7 @@ export class Commands {
     });
 
     this.bot.onText(/^\/cohort\b(.*)$/i, async (msg, match) => {
+      if (!(await this.ensureDmAccess(msg))) return;
       const chatId = msg.chat.id;
       const scopeKey = chatId;
       const raw = (match?.[1] || "").trim();
@@ -997,6 +1452,7 @@ export class Commands {
     });
 
     this.bot.onText(/^\/info\b(.*)$/i, async (msg, match) => {
+      if (!(await this.ensureDmAccess(msg))) return;
       const chatId = msg.chat.id;
       const scopeKey = chatId;
       const raw = (match?.[1] || "").trim();
@@ -1074,6 +1530,8 @@ export class Commands {
       );
     });
     this.bot.onText(/^\/scan\b(.*)$/i, async (msg, match) => {
+      if (!(await this.ensureDmAccess(msg))) return;
+
       const chatId = msg.chat.id;
       const userId = msg.from?.id ?? 0;
       const todayKey = utcDateKeyNow();
@@ -1081,7 +1539,51 @@ export class Commands {
       const raw = (match?.[1] || "").trim();
       const args = raw ? raw.split(/\s+/).filter(Boolean) : [];
       const symbolArg = args[0]?.toUpperCase();
-      const tfArg = args[1]?.toLowerCase();
+      let tfArg = args[1]?.toLowerCase();
+      const isDmChat = this._isPrivateChat(msg?.chat);
+      const isPremium = isDmChat
+        ? await isSubscriptionPremiumActive(String(userId)).catch(() => false)
+        : false;
+      const dmScanMax = Math.max(0, Math.floor(Number(this.env?.DM_SCAN_MAX_PER_DAY ?? 5)));
+
+      const premiumValidTfs = new Set(["15m", "30m", "1h", "4h"]);
+      let requestedPremiumTfs = null;
+
+      if (isDmChat && !isPremium && args.length > 0) {
+        await this._sendBotText(chatId, DM_PLAN_PICKER_TEXT, {
+          reply_markup: dmScanLimitKeyboard(this._subscribeChannelUrl())
+        });
+        return;
+      }
+
+      if (isDmChat && isPremium && symbolArg) {
+        if (args.length <= 1) {
+          requestedPremiumTfs = ["15m", "30m", "1h", "4h"];
+          tfArg = null;
+        } else {
+          const parsed = args.slice(1).map((tf) => String(tf || "").toLowerCase());
+          const invalid = parsed.filter((tf) => !premiumValidTfs.has(tf));
+          if (invalid.length) {
+            await this.sender.sendText(chatId, [
+              "CLOUD TREND ALERT",
+              "━━━━━━━━━━━━━━━━━━",
+              "⚠️ INVALID TIMEFRAME",
+              `Provided: ${invalid.join(", ")}`,
+              "Allowed: 15m, 30m, 1h, 4h",
+              "",
+              "Usage:",
+              "• /scan BTCUSDT",
+              "• /scan BTCUSDT 15m",
+              "• /scan BTCUSDT 1h",
+              `• /scan BTCUSDT ${String(this.env?.SECONDARY_TIMEFRAME || "4h")}`
+            ].join("\n"));
+            return;
+          }
+          requestedPremiumTfs = Array.from(new Set(parsed));
+          tfArg = requestedPremiumTfs.length === 1 ? requestedPremiumTfs[0] : null;
+        }
+      }
+
       const activeSymbols = (() => {
         try {
           const list = Array.isArray(this.positionsRepo.listActive?.()) ? this.positionsRepo.listActive() : [];
@@ -1109,7 +1611,7 @@ export class Commands {
         return list.map((x) => String(x).toLowerCase());
       })();
 
-      if (tfArg && !allowedTfs.includes(tfArg)) {
+      if (!requestedPremiumTfs && tfArg && !allowedTfs.includes(tfArg)) {
         await this.sender.sendText(chatId, [
           "CLOUD TREND ALERT",
           "━━━━━━━━━━━━━━━━━━",
@@ -1126,7 +1628,61 @@ export class Commands {
         return;
       }
 
-      // Count every /scan request (UTC day), regardless of outcome.
+      const premiumManualDmScan = isDmChat && isPremium && !!symbolArg;
+      if (premiumManualDmScan) {
+        const normalizeTfKey = (tfs) => {
+          const order = ["15m", "30m", "1h", "4h"];
+          const uniq = Array.from(new Set((Array.isArray(tfs) ? tfs : [])
+            .map((tf) => String(tf || "").toLowerCase())
+            .filter(Boolean)));
+          uniq.sort((a, b) => {
+            const ai = order.indexOf(a);
+            const bi = order.indexOf(b);
+            if (ai === -1 && bi === -1) return a.localeCompare(b);
+            if (ai === -1) return 1;
+            if (bi === -1) return -1;
+            return ai - bi;
+          });
+          return uniq.join(",");
+        };
+        const tfKey = (args.length <= 1)
+          ? "harmonic"
+          : (normalizeTfKey(requestedPremiumTfs) || "harmonic");
+        const throttleKey = `dm:${String(userId)}:scan:${String(symbolArg || "").toUpperCase()}:${tfKey}`;
+        const canSend = (typeof this.stateRepo?.canSendSymbol === "function")
+          ? this.stateRepo.canSendSymbol(throttleKey, 0.75)
+          : true;
+        if (!canSend) {
+          await this.sender.sendText(chatId, `⏳ Cooldown 45s. Please wait before scanning ${String(symbolArg || "").toUpperCase()} again.`);
+          return;
+        }
+        try {
+          if (typeof this.stateRepo?.markSent === "function") {
+            this.stateRepo.markSent(throttleKey);
+            await this.stateRepo.flush();
+          }
+        } catch {}
+      }
+
+      const shouldApplyFreeDmQuota = isDmChat && !isPremium && !symbolArg;
+      const bypassIntradayCooldown = premiumManualDmScan;
+      if (shouldApplyFreeDmQuota) {
+        const quota = await consumeDailyQuota(chatId, todayKey, "dmScanUsed", dmScanMax)
+          .catch(() => ({ ok: false, used: dmScanMax, max: dmScanMax, nextUsed: dmScanMax }));
+        if (!quota?.ok) {
+          const used = Number.isFinite(Number(quota?.used)) ? Number(quota.used) : dmScanMax;
+          const max = Number.isFinite(Number(quota?.max)) ? Number(quota.max) : dmScanMax;
+          await this._sendBotText(chatId, formatDmScanLimitReached({
+            used,
+            max
+          }), {
+            reply_markup: dmScanLimitKeyboard(this._subscribeChannelUrl())
+          });
+          return;
+        }
+      }
+
+      // Count accepted /scan requests (UTC day).
       try {
         if (typeof this.stateRepo.bumpScanRequest === "function") {
           this.stateRepo.bumpScanRequest();
@@ -1134,7 +1690,9 @@ export class Commands {
         }
       } catch {}
       try {
-        await incGroupStat(chatId, todayKey, "scanRequestsSuccess", 1);
+        if (!shouldApplyFreeDmQuota && !isDmChat) {
+          await incGroupStat(chatId, todayKey, "scanRequestsSuccess", 1);
+        }
       } catch {}
 
 
@@ -1142,11 +1700,47 @@ export class Commands {
       const rotationMode = !symbolArg;
       const swingTf = String(this.env?.SECONDARY_TIMEFRAME || "4h").toLowerCase();
       const isSwingTfLocal = (tf) => String(tf || "").toLowerCase() === swingTf;
+      const normSide = (d) => {
+        const x = String(d || "").toUpperCase();
+        if (!x) return "";
+        if (x.startsWith("LONG") || x === "L") return "LONG";
+        if (x.startsWith("SHORT") || x === "S") return "SHORT";
+        return x;
+      };
+      const inferPlaybookForDup = (sig) => {
+        const pb = String(sig?.playbook || "").toUpperCase();
+        if (pb) return pb;
+        const tf = String(sig?.tf || "").toLowerCase();
+        if (!tf) return "";
+        return isSwingTfLocal(tf) ? "SWING" : "INTRADAY";
+      };
+      const findActiveDupByKey = (sig) => {
+        if (!sig) return null;
+        try {
+          const s = String(sig?.symbol || "").toUpperCase();
+          const t = String(sig?.tf || "").toLowerCase();
+          const d = normSide(sig?.direction ?? sig?.dir);
+          const pb = inferPlaybookForDup(sig);
+          if (!s || !t || !d || !pb) return null;
+          const list = Array.isArray(this.positionsRepo.listActive?.()) ? this.positionsRepo.listActive() : [];
+          return list.find((p) => {
+            if (!p || p.status === "CLOSED" || p.status === "EXPIRED") return false;
+            const ps = String(p.symbol || "").toUpperCase();
+            const pt = String(p.tf || "").toLowerCase();
+            const pd = normSide(p.direction ?? p.dir);
+            const ppb = String(p.playbook || "").toUpperCase() || (isSwingTfLocal(pt) ? "SWING" : "INTRADAY");
+            return ps === s && pt === t && pd === d && ppb === pb;
+          }) || null;
+        } catch {
+          return null;
+        }
+      };
 
       const startedAt = Date.now();
       let out = null;
       let secondaryPick = null;
       let intradayPlans = [];
+      let rotationSwingCandidates = [];
 
 
       // Rotation mode keeps Progress UI (single edited message).
@@ -1156,6 +1750,7 @@ export class Commands {
           const swingList = Array.isArray(lists?.swing) ? lists.swing : [];
           const intradayList = Array.isArray(lists?.intraday) ? lists.intraday : [];
 
+          rotationSwingCandidates = swingList;
           intradayPlans = intradayList;
           secondaryPick = null;
 
@@ -1172,7 +1767,42 @@ export class Commands {
         try {
           let res = null;
 
-          if (symbolArg && !tfArg) {
+          if (isDmChat && isPremium && symbolArg) {
+            symbolUsed = symbolArg;
+            const requestedTfs = Array.isArray(requestedPremiumTfs) && requestedPremiumTfs.length
+              ? requestedPremiumTfs
+              : ["15m", "30m", "1h", "4h"];
+
+            const premiumRes = await runPremiumScan({
+              symbol: symbolArg,
+              tfs: requestedTfs,
+              pipeline: this.pipeline,
+              env: this.env,
+              scoreThreshold: 80
+            });
+
+            intradayPlans = Array.isArray(premiumRes?.intradayPlans) ? premiumRes.intradayPlans : [];
+            let swing = premiumRes?.swingSignal?.ok ? premiumRes.swingSignal : null;
+
+            if (!intradayPlans.length && !swing) {
+              const fallbackIntraday = [];
+              for (const tf of requestedTfs) {
+                if (isSwingTfLocal(tf)) continue;
+                const intr = await this.pipeline.scanPairIntraday(symbolArg, tf);
+                if (intr?.ok) fallbackIntraday.push(intr);
+              }
+
+              if (requestedTfs.some((tf) => isSwingTfLocal(tf))) {
+                const fallbackSwing = await this.pipeline.scanPairSwing(symbolArg);
+                if (fallbackSwing?.ok) swing = fallbackSwing;
+              }
+
+              intradayPlans = fallbackIntraday;
+            }
+
+            res = swing || (intradayPlans.length ? { ok: true, __intradayOnly: true } : null);
+            secondaryPick = null;
+          } else if (symbolArg && !tfArg) {
             symbolUsed = symbolArg;
             const swing = await this.pipeline.scanPairSwing(symbolArg);
             const intr = await this.pipeline.scanPairIntraday(symbolArg);
@@ -1292,6 +1922,22 @@ export class Commands {
       const intradayOnly = !!(tfArg && !isSwingTfLocal(tfArg));
       const swingOnly = !!(tfArg && isSwingTfLocal(tfArg));
       const dualSections = !tfArg;
+      const premiumRequestedSet = Array.isArray(requestedPremiumTfs) && requestedPremiumTfs.length
+        ? requestedPremiumTfs
+        : null;
+      const premiumWantsIntraday = premiumRequestedSet
+        ? premiumRequestedSet.some((tf) => !isSwingTfLocal(tf))
+        : false;
+      const premiumWantsSwing = premiumRequestedSet
+        ? premiumRequestedSet.some((tf) => isSwingTfLocal(tf))
+        : false;
+      const shouldShowIntradaySection = premiumRequestedSet
+        ? premiumWantsIntraday
+        : (hasIntraday || dualSections || intradayOnly);
+      const shouldShowSwingSection = premiumRequestedSet
+        ? premiumWantsSwing
+        : (dualSections || swingOnly);
+      const suppressRotationSectionText = rotationMode && !isDmChat;
 
       if (!swingOk && !hasIntraday) {
         await this.signalsRepo.logScanNoSignal({
@@ -1303,7 +1949,7 @@ export class Commands {
 
         try {
           if (symbolUsed) {
-            if (intradayOnly) {
+            if (intradayOnly || (premiumRequestedSet && !premiumWantsSwing)) {
               await this.sender.sendText(chatId, "No intraday trade plan found.");
             } else {
               const diags = this.pipeline.explainPair(symbolUsed);
@@ -1321,23 +1967,36 @@ export class Commands {
       }
 
       // INTRADAY section (Trade Plan)
-      if (hasIntraday || dualSections || intradayOnly) {
-        const sentSymbols = new Set();
+      if (shouldShowIntradaySection) {
+        const sentPlanKeys = new Set();
         let intradaySent = 0;
 
         if (hasIntraday) {
           for (const plan of intradayPlans) {
             const sym = String(plan?.symbol || "").toUpperCase();
-            if (!sym || sentSymbols.has(sym)) continue;
-            sentSymbols.add(sym);
+            const planTf = String(plan?.tf || "").toLowerCase() || "15m";
+            const sentKey = `${sym}:${planTf}`;
+            if (!sym || sentPlanKeys.has(sentKey)) continue;
+            sentPlanKeys.add(sentKey);
 
-            const cooldownKey = `${sym}:intraday`;
-            const canSend = typeof this.stateRepo?.canSendSymbol === "function"
-              ? this.stateRepo.canSendSymbol(cooldownKey, INTRADAY_COOLDOWN_MINUTES)
-              : true;
+            const cooldownKey = `${sym}:${planTf}:intraday`;
+            const dmCooldownKey = `dm:${String(userId)}:${sym}:${planTf}:intraday`;
+            const canSend = bypassIntradayCooldown
+              ? true
+              : (typeof this.stateRepo?.canSendSymbol === "function"
+                ? this.stateRepo.canSendSymbol(cooldownKey, INTRADAY_COOLDOWN_MINUTES)
+                : true);
             if (!canSend) continue;
 
             const { displaySignal, positionSignal } = mapIntradayPlanToSignal(plan);
+            if (premiumManualDmScan) {
+              const dupPos = findActiveDupByKey(positionSignal);
+              if (dupPos) {
+                const sideLabel = normSide(positionSignal.direction ?? positionSignal.dir) || String(positionSignal.direction || positionSignal.dir || "").toUpperCase();
+                await this.sender.sendText(chatId, `✅ Already active: ${sym} ${planTf} ${sideLabel}. Use /status to see the running plan.`);
+                continue;
+              }
+            }
             // chart FIRST (ENTRY only)
             const overlays = buildOverlays(displaySignal);
             const png = await renderEntryChart(displaySignal, overlays);
@@ -1348,7 +2007,12 @@ export class Commands {
               intradaySent++;
               try { await incGroupStat(chatId, todayKey, "scanSignalsSent", 1); } catch {}
             }
-            try { this.stateRepo?.markSent?.(cooldownKey); } catch {}
+            try {
+              if (typeof this.stateRepo?.markSent === "function") {
+                if (premiumManualDmScan) this.stateRepo.markSent(dmCooldownKey);
+                if (!premiumManualDmScan) this.stateRepo.markSent(cooldownKey);
+              }
+            } catch {}
 
             // Create monitored position for intraday so follow-ups reply to the original signal message.
             try {
@@ -1376,7 +2040,9 @@ export class Commands {
         }
 
         if (!hasIntraday) {
-          await this.sender.sendText(chatId, "No intraday trade plan found.");
+          if (!suppressRotationSectionText) {
+            await this.sender.sendText(chatId, "No intraday trade plan found.");
+          }
         }
 
         if (intradaySent) {
@@ -1385,7 +2051,7 @@ export class Commands {
       }
 
       if (!swingOk) {
-        if (dualSections || swingOnly) {
+        if (shouldShowSwingSection && !suppressRotationSectionText) {
           await this.sender.sendText(chatId, "No swing signal found.");
         }
         return;
@@ -1552,10 +2218,26 @@ export class Commands {
       // Guardrails + confluence shaping (LOCK)
       let onlyOneCard = applyGuardrails();
 
+      if (rotationMode && !isDmChat && Array.isArray(rotationSwingCandidates) && rotationSwingCandidates.length) {
+        const fallbackSwing = rotationSwingCandidates.find((sig) => {
+          if (!(sig && sig.ok && (sig.score || 0) >= 70 && sig.scoreLabel !== "NO SIGNAL")) return false;
+          if (findActiveDupByKey(sig)) return false;
+          if (typeof this.stateRepo?.canSendSymbol !== "function") return true;
+          const key = `${String(sig?.symbol || "").toUpperCase()}:swing`;
+          return this.stateRepo.canSendSymbol(key, this.env.COOLDOWN_MINUTES);
+        }) || null;
+
+        if (fallbackSwing) {
+          res = fallbackSwing;
+          symbolUsed = fallbackSwing?.symbol || symbolUsed;
+          ensurePlaybook(res);
+        }
+      }
+
       const swingCooldownKey = `${String(res?.symbol || "").toUpperCase()}:swing`;
-      const swingCooldownOk = typeof this.stateRepo?.canSendSymbol === "function"
+      const swingCooldownOk = (typeof this.stateRepo?.canSendSymbol === "function"
         ? this.stateRepo.canSendSymbol(swingCooldownKey, this.env.COOLDOWN_MINUTES)
-        : true;
+        : true);
       if (!swingCooldownOk) {
         try {
           await this.signalsRepo.logScanThrottled({
@@ -1572,10 +2254,12 @@ export class Commands {
       let secondarySent = false;
       let primaryDuplicatePos = null;
       let secondaryDuplicatePos = null;
+      const useStrictDupGuard = premiumManualDmScan || (rotationMode && !isDmChat);
+      const findActiveDupForSignal = (sig) => (useStrictDupGuard ? findActiveDupByKey(sig) : findActiveDup(sig));
 
       // Prevent duplicate active signals (same Pair + Timeframe) — primary pick
       try {
-        const existing = findActiveDup(res);
+        const existing = findActiveDupForSignal(res);
         if (existing) {
           primaryDuplicatePos = existing;
 
@@ -1662,7 +2346,7 @@ if (allowLegacyDual && rotationMode && primaryDuplicatePos) {
   }
 }
 
-if (primaryDuplicatePos) {
+      if (primaryDuplicatePos) {
         scanLog("primary_blocked_duplicate", {
           symbol: normSym(res?.symbol),
           tf: String(res?.tf || ""),
@@ -1685,8 +2369,14 @@ if (primaryDuplicatePos) {
       try {
         if (typeof this.stateRepo.bumpScanSignalsSent === "function") this.stateRepo.bumpScanSignalsSent(res.tf);
         else this.stateRepo.bumpScan(res.tf);
-        if (typeof this.stateRepo.markSentPairTf === "function") this.stateRepo.markSentPairTf(res.symbol, res.tf);
-        if (typeof this.stateRepo.markSent === "function") this.stateRepo.markSent(swingCooldownKey);
+        if (!premiumManualDmScan && typeof this.stateRepo.markSentPairTf === "function") this.stateRepo.markSentPairTf(res.symbol, res.tf);
+        if (typeof this.stateRepo.markSent === "function") {
+          if (premiumManualDmScan) {
+            this.stateRepo.markSent(`dm:${String(userId)}:${String(res?.symbol || "").toUpperCase()}:swing`);
+          } else {
+            this.stateRepo.markSent(swingCooldownKey);
+          }
+        }
         await this.stateRepo.flush();
       } catch {}
       // log entry
@@ -1719,18 +2409,7 @@ if (primaryDuplicatePos) {
         // Prevent duplicate active signals (same Pair + Timeframe)
         try {
           const existing =
-            (typeof this.positionsRepo.findActiveBySymbolTf === "function"
-              ? this.positionsRepo.findActiveBySymbolTf(secondaryPick.symbol, secondaryPick.tf)
-              : null) ||
-            (Array.isArray(this.positionsRepo.listActive?.())
-              ? this.positionsRepo.listActive().find((p) =>
-                  p &&
-                  p.status !== "CLOSED" &&
-                  p.status !== "EXPIRED" &&
-                  String(p.symbol || "").toUpperCase() === String(secondaryPick.symbol || "").toUpperCase() &&
-                  String(p.tf || "").toLowerCase() === String(secondaryPick.tf || "").toLowerCase()
-                )
-              : null);
+            findActiveDupForSignal(secondaryPick);
 
           if (existing) {
             await this.signalsRepo.logScanThrottled({
@@ -1756,7 +2435,7 @@ if (primaryDuplicatePos) {
             try {
               if (typeof this.stateRepo.bumpScanSignalsSent === "function") this.stateRepo.bumpScanSignalsSent(secondaryPick.tf);
               else this.stateRepo.bumpScan(secondaryPick.tf);
-              if (typeof this.stateRepo.markSentPairTf === "function") this.stateRepo.markSentPairTf(secondaryPick.symbol, secondaryPick.tf);
+              if (!premiumManualDmScan && typeof this.stateRepo.markSentPairTf === "function") this.stateRepo.markSentPairTf(secondaryPick.symbol, secondaryPick.tf);
               await this.stateRepo.flush();
             } catch {}
 
@@ -1787,12 +2466,17 @@ if (primaryDuplicatePos) {
       }
 
       // If primary was blocked by duplicate and no fallback was sent, show Duplicate Prevented (LOCK)
-      if (primaryDuplicatePos && !primarySent && !secondarySent) {
-        await this.sender.sendText(chatId, formatDuplicateNotice({
-          symbol: res.symbol,
-          tf: res.tf,
-          pos: primaryDuplicatePos
-        }));
+      if (primaryDuplicatePos && !primarySent && !secondarySent && (!rotationMode || isDmChat)) {
+        if (premiumManualDmScan) {
+          const sideLabel = normSide(res?.direction ?? res?.dir) || String(res?.direction || res?.dir || "").toUpperCase();
+          await this.sender.sendText(chatId, `✅ Already active: ${String(res?.symbol || "").toUpperCase()} ${String(res?.tf || "").toLowerCase()} ${sideLabel}. Use /status to see the running plan.`);
+        } else {
+          await this.sender.sendText(chatId, formatDuplicateNotice({
+            symbol: res.symbol,
+            tf: res.tf,
+            pos: primaryDuplicatePos
+          }));
+        }
       }
     });
   }
