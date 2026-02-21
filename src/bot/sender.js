@@ -6,6 +6,10 @@ export class Sender {
     this.allowDm = !!allowDm;
   }
 
+  isAllowed(chatId) {
+    return this._isAllowed(chatId);
+  }
+
   _isAllowed(chatId) {
     const id = String(chatId);
     if (Number(chatId) > 0) return this.allowDm === true;
@@ -45,10 +49,10 @@ export class Sender {
     }
   }
 
-  async sendText(chatId, text) {
+  async sendText(chatId, text, options = {}) {
     if (!this._isAllowed(chatId)) return null;
     return this._safeTelegramCall(() =>
-      this.bot.sendMessage(chatId, text, { disable_web_page_preview: true })
+      this.bot.sendMessage(chatId, text, { disable_web_page_preview: true, ...options })
     );
   }
 

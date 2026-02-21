@@ -2,6 +2,7 @@
 import { applyTP, applySL } from "./stateMachine.js";
 import { isWinOutcome } from "./outcomes.js";
 import { ENTRY_CONFIRM_MODE, ENTRY_CONFIRM_DWELL_MS } from "../config/constants.js";
+import { logger } from "../logger/logger.js";
 
 function limitConcurrency(n) {
   let active = 0;
@@ -58,6 +59,7 @@ export class Monitor {
     this.sender = sender;
     this.cards = cards;
     this.run = limitConcurrency(6);
+    this.warnedMissingNotify = new Set();
   }
 
   async tick(fallbackChatIdsToNotify = []) {
@@ -197,12 +199,23 @@ export class Monitor {
         this.stateRepo.bumpOutcome(pos.closedAt, isWinOutcome(pos.closeOutcome));
       }
 
-      const recipientsRaw = (Array.isArray(pos.notifyChatIds) && pos.notifyChatIds.length)
-        ? pos.notifyChatIds
-        : fallbackChatIdsToNotify;
+      const notifyChatIds = Array.isArray(pos.notifyChatIds) ? pos.notifyChatIds.map(String) : [];
+      if (!notifyChatIds.length) {
+        const posId = String(pos?.id ?? "");
+        const warnKey = posId || `${pos?.symbol ?? "?"}:${pos?.tf ?? "?"}:${pos?.source ?? "?"}:${pos?.createdAt ?? ""}`;
+        if (!this.warnedMissingNotify.has(warnKey)) {
+          logger.warn("[monitor] notifyChatIds missing; suppressing notifications", {
+            positionId: posId || null,
+            symbol: pos?.symbol ?? null,
+            tf: pos?.tf ?? null,
+            source: pos?.source ?? null
+          });
+          this.warnedMissingNotify.add(warnKey);
+        }
+      }
 
       // Normalize + dedupe recipients to prevent partial delivery issues on broadcast.
-      const recipients = Array.from(new Set((recipientsRaw || []).map(String)));
+      const recipients = Array.from(new Set(notifyChatIds));
 
       // Precompute ENTRY CONFIRMED payload once, then broadcast to all recipients before setting notified flags.
       const shouldSendEntry =
@@ -245,8 +258,8 @@ export class Monitor {
         // EXPIRED is tracked in logs/state, but not sent to chat by default.
       }
 
-      // Mark ENTRY CONFIRMED as notified only AFTER broadcasting to all notifyChatIds.
-      if (entryText && recipients.length) {
+      // Mark ENTRY CONFIRMED as notified after handling the event to avoid repeat emits.
+      if (entryText) {
         pos.entryHitNotifiedAt = Number(pos.filledAt) || Date.now();
         pos.entryHitAt = pos.entryHitAt || pos.entryHitNotifiedAt;
         pos.entryHitNotified = true;

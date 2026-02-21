@@ -1,9 +1,16 @@
 import path from "node:path";
 import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 import { env } from "./env.js";
 
-export const ROOT_DIR = process.cwd();
-export const DATA_DIR = path.join(ROOT_DIR, "data");
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+export const ROOT_DIR = path.resolve(__dirname, "../..");
+const DATA_DIR_ENV = String(env.DATA_DIR || "").trim();
+export const DATA_DIR = DATA_DIR_ENV
+  ? (path.isAbsolute(DATA_DIR_ENV) ? DATA_DIR_ENV : path.resolve(ROOT_DIR, DATA_DIR_ENV))
+  : path.join(ROOT_DIR, "data");
 export const SIGNALS_DIR = path.join(DATA_DIR, "signals");
 export const KLINES_DIR = path.join(DATA_DIR, "klines");
 

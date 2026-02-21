@@ -19,6 +19,7 @@ import {
 } from "../storage/subscriptionsRepo.js";
 import { runPremiumScan } from "../scan/premiumScan.js";
 import { INTRADAY_COOLDOWN_MINUTES } from "../config/constants.js";
+import { logger } from "../logger/logger.js";
 
 function mapIntradayPlanToSignal(plan = {}) {
   const entry = Number(plan?.levels?.entry ?? plan?.entry);
@@ -777,10 +778,7 @@ export class Commands {
 
   async _sendBotText(chatId, text, options = {}) {
     try {
-      return await this.bot.sendMessage(chatId, text, {
-        disable_web_page_preview: true,
-        ...options
-      });
+      return await this.sender.sendText(chatId, text, options);
     } catch {
       return null;
     }
@@ -811,7 +809,15 @@ export class Commands {
         try { this.dmSubscribersRepo?.add?.(msg?.chat?.id); } catch {}
         return true;
       }
-    } catch {}
+    } catch (err) {
+      const status = err?.response?.statusCode ?? err?.response?.status ?? err?.statusCode ?? err?.status;
+      const errorCode = err?.response?.body?.error_code ?? err?.code;
+      logger.warn("[dm] getChatMember failed", {
+        requiredChannelId,
+        status,
+        errorCode
+      });
+    }
 
     if (!silent) await this._sendDmStartMenu(msg?.chat?.id, DM_NOT_FOLLOWED_BLOCK_TEXT);
     return false;
@@ -992,10 +998,20 @@ export class Commands {
 
       if (!senderId || !adminIds.has(senderId)) return;
 
+      const replyInChat = this.sender?.isAllowed?.(msg?.chat?.id) ?? true;
+      const adminReplyChatId = replyInChat ? msg?.chat?.id : senderId;
+      const sendAdminReply = async (text) => {
+        if (adminReplyChatId === undefined || adminReplyChatId === null || adminReplyChatId === "") {
+          logger.warn("[approve] no admin reply target", { senderId });
+          return null;
+        }
+        return this.sender.sendText(adminReplyChatId, text);
+      };
+
       const targetUserId = String(match?.[1] || "").trim();
       const months = Number(match?.[2]);
       if (!targetUserId || ![1, 6, 12].includes(months)) {
-        await this._sendBotText(msg.chat.id, "Usage: /approve <userId> <months>");
+        await sendAdminReply("Usage: /approve <userId> <months>");
         return;
       }
 
@@ -1015,18 +1031,18 @@ export class Commands {
       }).catch(() => null);
 
       if (!approved) {
-        await this._sendBotText(msg.chat.id, "Approve failed. Try again.");
+        await sendAdminReply("Approve failed. Try again.");
         return;
       }
 
       const activeExpiry = await getSubscriptionExpiry(targetUserId).catch(() => null);
       const finalExpiry = String(activeExpiry || approved.expiresAtUtc || expiresAtUtc);
 
-      await this._sendBotText(targetUserId, formatDmPremiumUnlockedUserText({
+      await this.sender.sendText(targetUserId, formatDmPremiumUnlockedUserText({
         expiresAtUtc: finalExpiry
       }));
 
-      await this._sendBotText(msg.chat.id, [
+      await sendAdminReply([
         "Premium unlocked.",
         `User ID: ${targetUserId}`,
         `Months: ${months}`,
@@ -1757,6 +1773,23 @@ export class Commands {
           const primary = swingList[0] || null;
           symbolUsed = primary?.symbol || intradayList[0]?.symbol || null;
 
+          if (isDmChat && isPremium && symbolUsed) {
+            const premiumRes = await runPremiumScan({
+              symbol: symbolUsed,
+              tfs: ["15m", "30m", "1h", "4h"],
+              pipeline: this.pipeline,
+              env: this.env,
+              scoreThreshold: 80
+            });
+            const rawIntraday = Array.isArray(premiumRes?.intradayPlans) ? premiumRes.intradayPlans : [];
+            const swing = premiumRes?.swingSignal?.ok ? premiumRes.swingSignal : null;
+            if (rawIntraday.length || swing) {
+              if (rawIntraday.length > 1) rawIntraday.sort((a, b) => (b.score || 0) - (a.score || 0));
+              intradayPlans = rawIntraday.slice(0, 3);
+              return swing || (intradayPlans.length ? { ok: true, __intradayOnly: true } : null);
+            }
+          }
+
           if (primary) return primary;
           if (intradayList.length) return { ok: true, __intradayOnly: true };
           return null;
@@ -1781,23 +1814,22 @@ export class Commands {
               scoreThreshold: 80
             });
 
-            intradayPlans = Array.isArray(premiumRes?.intradayPlans) ? premiumRes.intradayPlans : [];
+            const harmonicPlans = Array.isArray(premiumRes?.intradayPlans) ? premiumRes.intradayPlans : [];
+            const harmonicByTf = new Set(harmonicPlans.map((p) => String(p?.tf || "").toLowerCase()).filter(Boolean));
+            const fallbackIntraday = [];
+            for (const tf of requestedTfs) {
+              if (isSwingTfLocal(tf)) continue;
+              const key = String(tf || "").toLowerCase();
+              if (harmonicByTf.has(key)) continue;
+              const intr = await this.pipeline.scanPairIntraday(symbolArg, tf);
+              if (intr?.ok) fallbackIntraday.push(intr);
+            }
+            intradayPlans = harmonicPlans.length ? [...harmonicPlans, ...fallbackIntraday] : fallbackIntraday;
+
             let swing = premiumRes?.swingSignal?.ok ? premiumRes.swingSignal : null;
-
-            if (!intradayPlans.length && !swing) {
-              const fallbackIntraday = [];
-              for (const tf of requestedTfs) {
-                if (isSwingTfLocal(tf)) continue;
-                const intr = await this.pipeline.scanPairIntraday(symbolArg, tf);
-                if (intr?.ok) fallbackIntraday.push(intr);
-              }
-
-              if (requestedTfs.some((tf) => isSwingTfLocal(tf))) {
-                const fallbackSwing = await this.pipeline.scanPairSwing(symbolArg);
-                if (fallbackSwing?.ok) swing = fallbackSwing;
-              }
-
-              intradayPlans = fallbackIntraday;
+            if (!swing && requestedTfs.some((tf) => isSwingTfLocal(tf))) {
+              const fallbackSwing = await this.pipeline.scanPairSwing(symbolArg);
+              if (fallbackSwing?.ok) swing = fallbackSwing;
             }
 
             res = swing || (intradayPlans.length ? { ok: true, __intradayOnly: true } : null);
@@ -1843,6 +1875,11 @@ export class Commands {
           query: { symbol: symbolUsed || null, tf: tfArg || null, raw: raw || "" },
           elapsedMs: out.elapsedMs
         });
+
+        if (isDmChat && isPremium) {
+          await this.sender.sendText(chatId, "No harmonic signal found.");
+          return;
+        }
 
         // explain (best-effort)
         try {

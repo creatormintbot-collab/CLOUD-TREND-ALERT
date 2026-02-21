@@ -27,6 +27,7 @@ export const env = {
   PREMIUM_USER_IDS: list(process.env.PREMIUM_USER_IDS).map(String),
   ADMIN_USER_IDS: list(process.env.ADMIN_USER_IDS).map(String),
   SUBSCRIBE_USDT_ADDRESS: process.env.SUBSCRIBE_USDT_ADDRESS || "",
+  DATA_DIR: process.env.DATA_DIR || "",
 
   BINANCE_FUTURES_REST: process.env.BINANCE_FUTURES_REST || "https://fapi.binance.com",
   BINANCE_FUTURES_WS: process.env.BINANCE_FUTURES_WS || "wss://fstream.binance.com/stream",

@@ -196,7 +196,20 @@ export async function isPremiumActive(userId) {
     if (!sub || sub.status !== "active") return false;
 
     const expiresMs = Date.parse(String(sub.expiresAtUtc || ""));
-    if (!Number.isFinite(expiresMs)) return true;
+    if (!Number.isFinite(expiresMs)) {
+      await enqueueWrite((store) => {
+        const next = { ...(store || {}) };
+        const latest = normalizeSubscription(next[id]);
+        if (!latest || latest.status !== "active") return next;
+
+        const latestExpiresMs = Date.parse(String(latest.expiresAtUtc || ""));
+        if (!Number.isFinite(latestExpiresMs)) {
+          next[id] = { ...latest, status: "expired" };
+        }
+        return next;
+      });
+      return false;
+    }
 
     if (expiresMs > Date.now()) return true;
 

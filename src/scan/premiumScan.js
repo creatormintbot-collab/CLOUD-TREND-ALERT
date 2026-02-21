@@ -331,6 +331,7 @@ function buildPlanForTf({ symbol, tf, candles, best, scoreThreshold }) {
       symbol,
       tf,
       direction,
+      playbook: "HARMONIC",
       score,
       scoreLabel: "HARMONIC",
       candleCloseTime,
