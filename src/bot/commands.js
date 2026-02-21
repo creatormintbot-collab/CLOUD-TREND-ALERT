@@ -1767,13 +1767,15 @@ export class Commands {
           const intradayList = Array.isArray(lists?.intraday) ? lists.intraday : [];
 
           rotationSwingCandidates = swingList;
-          intradayPlans = intradayList;
           secondaryPick = null;
 
           const primary = swingList[0] || null;
           symbolUsed = primary?.symbol || intradayList[0]?.symbol || null;
 
-          if (isDmChat && isPremium && symbolUsed) {
+          if (isDmChat && isPremium) {
+            intradayPlans = [];
+            if (!symbolUsed) return null;
+
             const premiumRes = await runPremiumScan({
               symbol: symbolUsed,
               tfs: ["15m", "30m", "1h", "4h"],
@@ -1788,8 +1790,16 @@ export class Commands {
               intradayPlans = rawIntraday.slice(0, 3);
               return swing || (intradayPlans.length ? { ok: true, __intradayOnly: true } : null);
             }
+
+            try {
+              console.info("[SCAN] premium_rotation_no_harmonic", JSON.stringify({ symbol: symbolUsed }));
+            } catch {
+              console.info("[SCAN] premium_rotation_no_harmonic");
+            }
+            return null;
           }
 
+          intradayPlans = intradayList;
           if (primary) return primary;
           if (intradayList.length) return { ok: true, __intradayOnly: true };
           return null;
