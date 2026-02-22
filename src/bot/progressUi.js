@@ -20,7 +20,13 @@ export class ProgressUi {
   lock(key) { this.locks.set(String(key), true); }
   unlock(key) { this.locks.delete(String(key)); }
 
-  async run({ chatId, userId }, fn) {
+  async run({ chatId, userId }, fn, opts = {}) {
+    const {
+      noSignalText = "⚠️ No setup detected. Details will be shown below.",
+      okText = "✅ AI Futures Signal Generated! 100%",
+      timeoutText = "⚠️ Scan timeout. Please try again.",
+      errorText = "⚠️ Scan failed. Try again later."
+    } = opts || {};
     const key = this._key(chatId, userId);
 
     // throttle
@@ -57,27 +63,27 @@ export class ProgressUi {
       await sleep(this.STEP_DELAY_MS);
 
       if (elapsed() > this.TIMEOUT_MS) {
-        await this.sender.editText(chatId, msg.message_id, "⚠️ Scan timeout. Please try again.");
+        if (timeoutText) await this.sender.editText(chatId, msg.message_id, timeoutText);
         return { kind: "TIMEOUT", elapsedMs: elapsed(), result: null, messageId: msg?.message_id || null };
       }
 
       const res = await fn();
 
       if (elapsed() > this.TIMEOUT_MS) {
-        await this.sender.editText(chatId, msg.message_id, "⚠️ Scan timeout. Please try again.");
+        if (timeoutText) await this.sender.editText(chatId, msg.message_id, timeoutText);
         return { kind: "TIMEOUT", elapsedMs: elapsed(), result: null, messageId: msg?.message_id || null };
       }
 
       if (!res) {
-        await this.sender.editText(chatId, msg.message_id, "⚠️ No valid setup found. Details will be shown below.");
+        if (noSignalText) await this.sender.editText(chatId, msg.message_id, noSignalText);
         return { kind: "NO_SIGNAL", elapsedMs: elapsed(), result: null, messageId: msg?.message_id || null };
       }
 
-      await this.sender.editText(chatId, msg.message_id, "✅ AI Futures Signal Generated! 100%");
+      if (okText) await this.sender.editText(chatId, msg.message_id, okText);
       return { kind: "OK", elapsedMs: elapsed(), result: res, messageId: msg?.message_id || null };
     } catch (e) {
       if (msg?.message_id) {
-        await this.sender.editText(chatId, msg.message_id, "⚠️ Scan failed. Try again later.");
+        if (errorText) await this.sender.editText(chatId, msg.message_id, errorText);
       }
       return { kind: "ERROR", elapsedMs: elapsed(), result: null, messageId: msg?.message_id || null, error: e };
     } finally {
