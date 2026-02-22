@@ -1811,8 +1811,16 @@ export class Commands {
       let effectiveTfArg = tfArg;
       let effectiveRequestedPremiumTfs = requestedPremiumTfs;
       let discoveryProgressMessageId = null;
+      const isDiscoveryOrigin = isDmChat && isPremium && !symbolArg;
+      let discoveryTopSetups = [];
+      let discoveryScannedCount = PREMIUM_DM_DISCOVERY_UNIVERSE_SIZE;
+      let discoveryReasonCodes = [];
+      let discoveryElapsedMs = 0;
+      let discoveryAttemptIndex = -1;
+      let discoveryBlockedByDuplicateAny = false;
+      let discoveryLastReasonCode = "UNSPECIFIED";
       let premiumManualDmScan = isDmChat && isPremium && !!scanSymbolArg;
-      let premiumDiscovery = isDmChat && isPremium && !scanSymbolArg;
+      let premiumDiscovery = isDiscoveryOrigin && !scanSymbolArg;
       const premiumMode = premiumDiscovery
         ? PREMIUM_DM_MODE_DISCOVERY
         : (premiumManualDmScan ? PREMIUM_DM_MODE_TARGETED : "");
@@ -1910,15 +1918,11 @@ export class Commands {
           timedOut
         });
 
-        const bestSetup = topSetups[0] || null;
-        const bestSymbol = String(bestSetup?.symbol || "").toUpperCase();
-
-        if (bestSymbol) {
-          scanSymbolArg = bestSymbol;
-          effectiveRequestedPremiumTfs = PREMIUM_DM_TFS.slice();
-          effectiveTfArg = null;
-          premiumManualDmScan = true;
-          premiumDiscovery = false;
+        if (topSetups.length) {
+          discoveryTopSetups = topSetups;
+          discoveryScannedCount = scannedCount;
+          discoveryReasonCodes = reasonCodes;
+          discoveryElapsedMs = elapsedMs;
           discoveryProgressMessageId = Number(progress?.messageId || 0) || null;
           if (discoveryProgressMessageId && typeof this.bot?.deleteMessage === "function") {
             try {
@@ -1965,6 +1969,71 @@ export class Commands {
         }
       }
 
+      const applyDiscoveryCandidate = (index) => {
+        if (!isDiscoveryOrigin) return false;
+        const setup = discoveryTopSetups[index] || null;
+        const setupSymbol = String(setup?.symbol || "").toUpperCase();
+        const setupTf = String(setup?.tf || "").toLowerCase();
+        if (!setupSymbol || !setupTf) return false;
+
+        scanSymbolArg = setupSymbol;
+        effectiveTfArg = setupTf;
+        effectiveRequestedPremiumTfs = [setupTf];
+        premiumManualDmScan = true;
+        premiumDiscovery = false;
+        discoveryAttemptIndex = index;
+        return true;
+      };
+
+      const advanceDiscoveryCandidate = () => {
+        if (!isDiscoveryOrigin) return false;
+        for (let i = discoveryAttemptIndex + 1; i < discoveryTopSetups.length; i++) {
+          if (applyDiscoveryCandidate(i)) return true;
+        }
+        return false;
+      };
+
+      const sendDiscoveryNoSetup = async (fallbackReason = "UNSPECIFIED") => {
+        const reasonList = discoveryBlockedByDuplicateAny
+          ? ["DUPLICATE_ACTIVE"]
+          : ((discoveryReasonCodes.length ? discoveryReasonCodes : [fallbackReason]).map((x) => String(x || "").toUpperCase()).filter(Boolean));
+        const finalReasonList = reasonList.length ? reasonList : ["UNSPECIFIED"];
+        const primaryReason = finalReasonList[0] || "UNSPECIFIED";
+
+        const cardText = noSetupCard({
+          variant: "DISCOVERY",
+          scannedCount: Number(discoveryScannedCount || PREMIUM_DM_DISCOVERY_UNIVERSE_SIZE),
+          timeframes: PREMIUM_DM_TFS,
+          scoreThreshold: PREMIUM_DM_SCORE_THRESHOLD,
+          cooldownSeconds: PREMIUM_DM_DISCOVERY_COOLDOWN_SEC,
+          reasonCodes: finalReasonList,
+          minCandles: PREMIUM_MIN_CANDLES
+        });
+
+        try {
+          await this.signalsRepo.logScanNoSignal({
+            chatId,
+            query: { symbol: null, tf: null, raw: "" },
+            elapsedMs: Number(discoveryElapsedMs || 0),
+            meta: { reasonCode: primaryReason }
+          });
+        } catch {}
+
+        logger.info("[scan] premium_dm_no_setup", {
+          mode: PREMIUM_DM_MODE_DISCOVERY,
+          reasonCode: primaryReason
+        });
+
+        await this.sender.sendText(chatId, cardText);
+      };
+
+      if (isDiscoveryOrigin && discoveryTopSetups.length) {
+        if (!advanceDiscoveryCandidate()) {
+          await sendDiscoveryNoSetup("UNSPECIFIED");
+          return;
+        }
+      }
+
       const shouldApplyFreeDmQuota = isDmChat && !isPremium && !symbolArg;
       const bypassIntradayCooldown = premiumManualDmScan;
       if (shouldApplyFreeDmQuota) {
@@ -1995,8 +2064,8 @@ export class Commands {
           await incGroupStat(chatId, todayKey, "scanRequestsSuccess", 1);
         }
       } catch {}
-
-
+      attemptLoop:
+      while (true) {
       let symbolUsed = scanSymbolArg || null;
       const rotationMode = !scanSymbolArg;
       const swingTf = String(this.env?.SECONDARY_TIMEFRAME || "4h").toLowerCase();
@@ -2142,6 +2211,13 @@ export class Commands {
           const reasonCodes = extractReasonCodes(tfResults);
           const reasonList = reasonCodes.length ? reasonCodes : ["UNSPECIFIED"];
           const primaryReason = reasonList[0] || "UNSPECIFIED";
+
+          if (isDiscoveryOrigin) {
+            discoveryLastReasonCode = String(primaryReason || "UNSPECIFIED").toUpperCase();
+            if (advanceDiscoveryCandidate()) continue attemptLoop;
+            await sendDiscoveryNoSetup(discoveryLastReasonCode);
+            return;
+          }
 
           const tfNoSetupList = tfResults.filter((r) => r && r.ok === false)
             .map((r) => String(r.tf || "").toLowerCase())
@@ -2295,8 +2371,17 @@ export class Commands {
         ? premiumWantsSwing
         : (dualSections || swingOnly);
       const suppressRotationSectionText = rotationMode && !isDmChat;
+      let intradaySent = 0;
+      let discoveryBlockedByDuplicate = false;
 
       if (!swingOk && !hasIntraday) {
+        if (isDiscoveryOrigin) {
+          discoveryLastReasonCode = "SCORE_LT_70_OR_INVALID";
+          if (advanceDiscoveryCandidate()) continue attemptLoop;
+          await sendDiscoveryNoSetup(discoveryLastReasonCode);
+          return;
+        }
+
         await this.signalsRepo.logScanNoSignal({
           chatId,
           query: { symbol: symbolUsed || null, tf: effectiveTfArg || null, raw: raw || "" },
@@ -2306,7 +2391,7 @@ export class Commands {
 
         try {
           if (symbolUsed) {
-            if (intradayOnly || (premiumRequestedSet && !premiumWantsSwing)) {
+            if (!isDiscoveryOrigin && (intradayOnly || (premiumRequestedSet && !premiumWantsSwing))) {
               await this.sender.sendText(chatId, "No intraday trade plan found.");
             } else {
               const diags = this.pipeline.explainPair(symbolUsed);
@@ -2326,7 +2411,6 @@ export class Commands {
       // INTRADAY section (Trade Plan)
       if (shouldShowIntradaySection) {
         const sentPlanKeys = new Set();
-        let intradaySent = 0;
 
         if (hasIntraday) {
           for (const plan of intradayPlans) {
@@ -2350,7 +2434,12 @@ export class Commands {
               const dupPos = findActiveDupByKey(positionSignal);
               if (dupPos) {
                 const sideLabel = normSide(positionSignal.direction ?? positionSignal.dir) || String(positionSignal.direction || positionSignal.dir || "").toUpperCase();
-                await this.sender.sendText(chatId, `✅ Already active: ${sym} ${planTf} ${sideLabel}. Use /status to see the running plan.`);
+                if (isDiscoveryOrigin) {
+                  discoveryBlockedByDuplicate = true;
+                  discoveryBlockedByDuplicateAny = true;
+                } else {
+                  await this.sender.sendText(chatId, `✅ Already active: ${sym} ${planTf} ${sideLabel}. Use /status to see the running plan.`);
+                }
                 continue;
               }
             }
@@ -2397,7 +2486,7 @@ export class Commands {
         }
 
         if (!hasIntraday) {
-          if (!suppressRotationSectionText) {
+          if (!suppressRotationSectionText && !isDiscoveryOrigin) {
             await this.sender.sendText(chatId, "No intraday trade plan found.");
           }
         }
@@ -2405,6 +2494,13 @@ export class Commands {
         if (intradaySent) {
           try { await this.stateRepo.flush(); } catch {}
         }
+      }
+
+      if (isDiscoveryOrigin && discoveryBlockedByDuplicate && !intradaySent && !swingOk) {
+        discoveryLastReasonCode = "DUPLICATE_ACTIVE";
+        if (advanceDiscoveryCandidate()) continue attemptLoop;
+        await sendDiscoveryNoSetup(discoveryLastReasonCode);
+        return;
       }
 
       if (!swingOk) {
@@ -2703,6 +2799,11 @@ if (allowLegacyDual && rotationMode && primaryDuplicatePos) {
   }
 }
 
+      if (primaryDuplicatePos && isDiscoveryOrigin) {
+        discoveryBlockedByDuplicate = true;
+        discoveryBlockedByDuplicateAny = true;
+      }
+
       if (primaryDuplicatePos) {
         scanLog("primary_blocked_duplicate", {
           symbol: normSym(res?.symbol),
@@ -2824,6 +2925,12 @@ if (allowLegacyDual && rotationMode && primaryDuplicatePos) {
 
       // If primary was blocked by duplicate and no fallback was sent, show Duplicate Prevented (LOCK)
       if (primaryDuplicatePos && !primarySent && !secondarySent && (!rotationMode || isDmChat)) {
+        if (isDiscoveryOrigin) {
+          discoveryLastReasonCode = "DUPLICATE_ACTIVE";
+          if (advanceDiscoveryCandidate()) continue attemptLoop;
+          await sendDiscoveryNoSetup(discoveryLastReasonCode);
+          return;
+        }
         if (premiumManualDmScan) {
           const sideLabel = normSide(res?.direction ?? res?.dir) || String(res?.direction || res?.dir || "").toUpperCase();
           await this.sender.sendText(chatId, `✅ Already active: ${String(res?.symbol || "").toUpperCase()} ${String(res?.tf || "").toLowerCase()} ${sideLabel}. Use /status to see the running plan.`);
@@ -2834,6 +2941,8 @@ if (allowLegacyDual && rotationMode && primaryDuplicatePos) {
             pos: primaryDuplicatePos
           }));
         }
+      }
+      return;
       }
     });
   }
