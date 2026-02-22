@@ -20,7 +20,7 @@ import {
 import { runPremiumScan, PREMIUM_MIN_CANDLES } from "../scan/premiumScan.js";
 import { INTRADAY_COOLDOWN_MINUTES } from "../config/constants.js";
 import { logger } from "../logger/logger.js";
-import { cooldownCard, discoveryTopCard, noSetupCard } from "./cards/premium/index.js";
+import { cooldownCard, noSetupCard } from "./cards/premium/index.js";
 import { get as getScanCooldown, set as setScanCooldown } from "../storage/scanCooldownRepo.js";
 
 function mapIntradayPlanToSignal(plan = {}) {
@@ -1807,8 +1807,12 @@ export class Commands {
         return;
       }
 
-      const premiumManualDmScan = isDmChat && isPremium && !!symbolArg;
-      const premiumDiscovery = isDmChat && isPremium && !symbolArg;
+      let scanSymbolArg = symbolArg;
+      let effectiveTfArg = tfArg;
+      let effectiveRequestedPremiumTfs = requestedPremiumTfs;
+      let discoveryProgressMessageId = null;
+      let premiumManualDmScan = isDmChat && isPremium && !!scanSymbolArg;
+      let premiumDiscovery = isDmChat && isPremium && !scanSymbolArg;
       const premiumMode = premiumDiscovery
         ? PREMIUM_DM_MODE_DISCOVERY
         : (premiumManualDmScan ? PREMIUM_DM_MODE_TARGETED : "");
@@ -1906,18 +1910,25 @@ export class Commands {
           timedOut
         });
 
-        let cardText = "";
-        if (topSetups.length) {
-          cardText = discoveryTopCard({
-            scannedCount,
-            timeframes: PREMIUM_DM_TFS,
-            scoreThreshold: PREMIUM_DM_SCORE_THRESHOLD,
-            setups: topSetups,
-            cooldownSeconds: PREMIUM_DM_DISCOVERY_COOLDOWN_SEC
-          });
+        const bestSetup = topSetups[0] || null;
+        const bestSymbol = String(bestSetup?.symbol || "").toUpperCase();
+
+        if (bestSymbol) {
+          scanSymbolArg = bestSymbol;
+          effectiveRequestedPremiumTfs = PREMIUM_DM_TFS.slice();
+          effectiveTfArg = null;
+          premiumManualDmScan = true;
+          premiumDiscovery = false;
+          discoveryProgressMessageId = Number(progress?.messageId || 0) || null;
+          if (discoveryProgressMessageId && typeof this.bot?.deleteMessage === "function") {
+            try {
+              await this.bot.deleteMessage(chatId, discoveryProgressMessageId);
+              discoveryProgressMessageId = null;
+            } catch {}
+          }
         } else {
           const reasonList = reasonCodes.length ? reasonCodes : ["UNSPECIFIED"];
-          cardText = noSetupCard({
+          const cardText = noSetupCard({
             variant: "DISCOVERY",
             scannedCount,
             timeframes: PREMIUM_DM_TFS,
@@ -1941,17 +1952,17 @@ export class Commands {
             mode: PREMIUM_DM_MODE_DISCOVERY,
             reasonCode: primaryReason
           });
-        }
 
-        if (progress.messageId) {
-          try {
-            await this.sender.editText(chatId, progress.messageId, cardText);
-          } catch {}
-        } else {
-          await this.sender.sendText(chatId, cardText);
-        }
+          if (progress.messageId) {
+            try {
+              await this.sender.editText(chatId, progress.messageId, cardText);
+            } catch {}
+          } else {
+            await this.sender.sendText(chatId, cardText);
+          }
 
-        return;
+          return;
+        }
       }
 
       const shouldApplyFreeDmQuota = isDmChat && !isPremium && !symbolArg;
@@ -1986,8 +1997,8 @@ export class Commands {
       } catch {}
 
 
-      let symbolUsed = symbolArg || null;
-      const rotationMode = !symbolArg;
+      let symbolUsed = scanSymbolArg || null;
+      const rotationMode = !scanSymbolArg;
       const swingTf = String(this.env?.SECONDARY_TIMEFRAME || "4h").toLowerCase();
       const isSwingTfLocal = (tf) => String(tf || "").toLowerCase() === swingTf;
       const normSide = (d) => {
@@ -2058,14 +2069,14 @@ export class Commands {
         try {
           let res = null;
 
-          if (isDmChat && isPremium && symbolArg) {
-            symbolUsed = symbolArg;
-            const requestedTfs = Array.isArray(requestedPremiumTfs) && requestedPremiumTfs.length
-              ? requestedPremiumTfs
+          if (isDmChat && isPremium && scanSymbolArg) {
+            symbolUsed = scanSymbolArg;
+            const requestedTfs = Array.isArray(effectiveRequestedPremiumTfs) && effectiveRequestedPremiumTfs.length
+              ? effectiveRequestedPremiumTfs
               : PREMIUM_DM_TFS;
 
             const premiumRes = await runPremiumScan({
-              symbol: symbolArg,
+              symbol: scanSymbolArg,
               tfs: requestedTfs,
               pipeline: this.pipeline,
               env: this.env,
@@ -2084,19 +2095,19 @@ export class Commands {
             const swing = premiumRes?.swingSignal?.ok ? premiumRes.swingSignal : null;
             res = swing || (intradayPlans.length ? { ok: true, __intradayOnly: true } : null);
             secondaryPick = null;
-          } else if (symbolArg && !tfArg) {
-            symbolUsed = symbolArg;
-            const swing = await this.pipeline.scanPairSwing(symbolArg);
-            const intr = await this.pipeline.scanPairIntraday(symbolArg);
+          } else if (scanSymbolArg && !effectiveTfArg) {
+            symbolUsed = scanSymbolArg;
+            const swing = await this.pipeline.scanPairSwing(scanSymbolArg);
+            const intr = await this.pipeline.scanPairIntraday(scanSymbolArg);
             intradayPlans = intr?.ok ? [intr] : [];
             res = swing || (intradayPlans.length ? { ok: true, __intradayOnly: true } : null);
             secondaryPick = null;
           } else {
-            symbolUsed = symbolArg;
-            if (tfArg && isSwingTfLocal(tfArg)) {
-              res = await this.pipeline.scanPairSwing(symbolArg);
+            symbolUsed = scanSymbolArg;
+            if (effectiveTfArg && isSwingTfLocal(effectiveTfArg)) {
+              res = await this.pipeline.scanPairSwing(scanSymbolArg);
             } else {
-              const intr = await this.pipeline.scanPairIntraday(symbolArg, tfArg);
+              const intr = await this.pipeline.scanPairIntraday(scanSymbolArg, effectiveTfArg);
               intradayPlans = intr?.ok ? [intr] : [];
               res = intradayPlans.length ? { ok: true, __intradayOnly: true } : null;
             }
@@ -2114,7 +2125,7 @@ export class Commands {
       if (out.kind === "THROTTLED") {
         await this.signalsRepo.logScanThrottled({
           chatId,
-          query: { symbol: symbolUsed || null, tf: tfArg || null, raw: raw || "" }
+          query: { symbol: symbolUsed || null, tf: effectiveTfArg || null, raw: raw || "" }
         });
         return;
       }
@@ -2126,7 +2137,7 @@ export class Commands {
           const meta = out?.premiumMeta || {};
           const requestedTfs = Array.isArray(meta.requestedTfs) && meta.requestedTfs.length
             ? meta.requestedTfs
-            : (tfArg ? [tfArg] : PREMIUM_DM_TFS);
+            : (effectiveTfArg ? [effectiveTfArg] : PREMIUM_DM_TFS);
           const tfResults = Array.isArray(meta.tfResults) ? meta.tfResults : [];
           const reasonCodes = extractReasonCodes(tfResults);
           const reasonList = reasonCodes.length ? reasonCodes : ["UNSPECIFIED"];
@@ -2138,11 +2149,11 @@ export class Commands {
           const checkedTfs = tfNoSetupList.length ? tfNoSetupList : requestedTfs;
 
           const isSingleTf = requestedTfs.length === 1;
-          const tfLabel = String(tfArg || requestedTfs[0] || "").toLowerCase();
+          const tfLabel = String(effectiveTfArg || requestedTfs[0] || "").toLowerCase();
 
           const cardText = noSetupCard({
             variant: isSingleTf ? "TARGETED_SINGLE" : "TARGETED_MULTI",
-            symbol: symbolUsed || symbolArg || "",
+            symbol: symbolUsed || scanSymbolArg || "",
             tf: tfLabel,
             timeframes: requestedTfs,
             tfNoSetupList: checkedTfs,
@@ -2155,7 +2166,7 @@ export class Commands {
           try {
             await this.signalsRepo.logScanNoSignal({
               chatId,
-              query: { symbol: symbolUsed || null, tf: tfArg || null, raw: "" },
+              query: { symbol: symbolUsed || null, tf: effectiveTfArg || null, raw: "" },
               elapsedMs: out.elapsedMs,
               meta: { reasonCode: primaryReason }
             });
@@ -2163,8 +2174,8 @@ export class Commands {
 
           logger.info("[scan] premium_dm_no_setup", {
             mode: PREMIUM_DM_MODE_TARGETED,
-            symbol: symbolUsed || symbolArg || null,
-            tf: tfArg || null,
+            symbol: symbolUsed || scanSymbolArg || null,
+            tf: effectiveTfArg || null,
             reasonCode: primaryReason
           });
 
@@ -2174,7 +2185,7 @@ export class Commands {
 
         await this.signalsRepo.logScanNoSignal({
           chatId,
-          query: { symbol: symbolUsed || null, tf: tfArg || null, raw: raw || "" },
+          query: { symbol: symbolUsed || null, tf: effectiveTfArg || null, raw: raw || "" },
           elapsedMs: out.elapsedMs
         });
 
@@ -2182,11 +2193,11 @@ export class Commands {
         try {
           if (symbolUsed) {
             if (symbolArg && tfArg) {
-              const d = this.pipeline.explainPairTf(symbolUsed, tfArg);
+              const d = this.pipeline.explainPairTf(symbolUsed, effectiveTfArg);
               await this.sender.sendText(chatId, formatExplain({
                 symbol: symbolUsed,
                 diags: [d],
-                tfExplicit: tfArg,
+                tfExplicit: effectiveTfArg,
                 rotationNote: false
               }));
             } else {
@@ -2207,7 +2218,7 @@ export class Commands {
       if (out.kind === "TIMEOUT") {
         await this.signalsRepo.logScanTimeout({
           chatId,
-          query: { symbol: symbolUsed || null, tf: tfArg || null, raw: raw || "" },
+          query: { symbol: symbolUsed || null, tf: effectiveTfArg || null, raw: raw || "" },
           elapsedMs: out.elapsedMs
         });
 
@@ -2230,7 +2241,7 @@ export class Commands {
         try {
           await this.signalsRepo.logScanTimeout({
             chatId,
-            query: { symbol: symbolUsed || null, tf: tfArg || null, raw: raw || "" },
+            query: { symbol: symbolUsed || null, tf: effectiveTfArg || null, raw: raw || "" },
             elapsedMs: out.elapsedMs,
             meta: { reason: "EXCEPTION", err: errMsg.slice(0, 500) }
           });
@@ -2249,15 +2260,27 @@ export class Commands {
 
       if (out.kind !== "OK") return;
 
+      const sendEntrySignalText = async (text) => {
+        if (discoveryProgressMessageId) {
+          const messageId = discoveryProgressMessageId;
+          discoveryProgressMessageId = null;
+          try {
+            await this.sender.editText(chatId, messageId, text);
+            return { message_id: messageId };
+          } catch {}
+        }
+        return this.sender.sendText(chatId, text);
+      };
+
       let res = out.result;
       const swingRes = (res && res.ok && !res.__intradayOnly) ? res : null;
       const swingOk = !!(swingRes && swingRes.ok && (swingRes.score || 0) >= 70 && swingRes.scoreLabel !== "NO SIGNAL");
       const hasIntraday = Array.isArray(intradayPlans) && intradayPlans.length > 0;
-      const intradayOnly = !!(tfArg && !isSwingTfLocal(tfArg));
-      const swingOnly = !!(tfArg && isSwingTfLocal(tfArg));
-      const dualSections = !tfArg;
-      const premiumRequestedSet = Array.isArray(requestedPremiumTfs) && requestedPremiumTfs.length
-        ? requestedPremiumTfs
+      const intradayOnly = !!(effectiveTfArg && !isSwingTfLocal(effectiveTfArg));
+      const swingOnly = !!(effectiveTfArg && isSwingTfLocal(effectiveTfArg));
+      const dualSections = !effectiveTfArg;
+      const premiumRequestedSet = Array.isArray(effectiveRequestedPremiumTfs) && effectiveRequestedPremiumTfs.length
+        ? effectiveRequestedPremiumTfs
         : null;
       const premiumWantsIntraday = premiumRequestedSet
         ? premiumRequestedSet.some((tf) => !isSwingTfLocal(tf))
@@ -2276,7 +2299,7 @@ export class Commands {
       if (!swingOk && !hasIntraday) {
         await this.signalsRepo.logScanNoSignal({
           chatId,
-          query: { symbol: symbolUsed || null, tf: tfArg || null, raw: raw || "" },
+          query: { symbol: symbolUsed || null, tf: effectiveTfArg || null, raw: raw || "" },
           elapsedMs: out.elapsedMs,
           meta: { reason: "SCORE_LT_70_OR_INVALID" }
         });
@@ -2336,7 +2359,7 @@ export class Commands {
             const png = await renderEntryChart(displaySignal, overlays);
             await this.sender.sendPhoto(chatId, png);
 
-            const entryMsg = await this.sender.sendText(chatId, entryCard(displaySignal));
+            const entryMsg = await sendEntrySignalText(entryCard(displaySignal));
             if (entryMsg) {
               intradaySent++;
               try { await incGroupStat(chatId, todayKey, "scanSignalsSent", 1); } catch {}
@@ -2692,7 +2715,7 @@ if (allowLegacyDual && rotationMode && primaryDuplicatePos) {
       const png = await renderEntryChart(res, overlays);
       await this.sender.sendPhoto(chatId, png);
 
-      const entryMsg = await this.sender.sendText(chatId, entryCard(res));
+      const entryMsg = await sendEntrySignalText(entryCard(res));
       if (entryMsg) {
         try {
           await incGroupStat(chatId, todayKey, "scanSignalsSent", 1);
@@ -2758,7 +2781,7 @@ if (allowLegacyDual && rotationMode && primaryDuplicatePos) {
             const png2 = await renderEntryChart(secondaryPick, overlays2);
             await this.sender.sendPhoto(chatId, png2);
 
-            const entryMsg2 = await this.sender.sendText(chatId, entryCard(secondaryPick));
+            const entryMsg2 = await sendEntrySignalText(entryCard(secondaryPick));
             if (entryMsg2) {
               try {
                 await incGroupStat(chatId, todayKey, "scanSignalsSent", 1);
