@@ -1,6 +1,7 @@
 const PREMIUM_VALID_TFS = new Set(["15m", "30m", "1h", "4h"]);
 const PIVOT_TRAILING_BARS = 7;
 const MIN_CANDLES = 220;
+export const PREMIUM_MIN_CANDLES = MIN_CANDLES;
 const STOP_PCT = 75;
 const ENTRY_TOLERANCE_PCT = 0.01;
 
@@ -242,6 +243,31 @@ function scorePattern(ratios, patternDef) {
   return { score, qualities };
 }
 
+function patternMatchesTolerance(ratios, patternDef) {
+  const rules = Array.isArray(patternDef?.rules) ? patternDef.rules : [];
+  if (!rules.length) return false;
+  for (const rule of rules) {
+    const actual = Number(ratios?.[rule.key]);
+    if (!(qualityForRule(actual, rule) > 0)) return false;
+  }
+  return true;
+}
+
+function bestPatternFromRatios(ratios) {
+  let best = null;
+  let matchCount = 0;
+
+  for (const pattern of PATTERN_DEFS) {
+    const { score } = scorePattern(ratios, pattern);
+    if (patternMatchesTolerance(ratios, pattern)) matchCount += 1;
+    if (!best || score > best.score) {
+      best = { pattern, score };
+    }
+  }
+
+  return { best, matchCount };
+}
+
 function parseTargetLabel(label) {
   const text = String(label || "").trim().toUpperCase();
   const m = text.match(/^([0-9]*\.?[0-9]+)\s*(AD|CD|XA)$/i);
@@ -272,7 +298,7 @@ function buildPlanForTf({ symbol, tf, candles, best, scoreThreshold }) {
   if (!best || !best.points || !best.pattern) return null;
 
   const score = Number(best.score || 0);
-  if (!(score > Number(scoreThreshold))) return null;
+  if (!(score >= Number(scoreThreshold))) return null;
 
   const { X, A, C, D } = best.points;
   const direction = String(D?.type || "") === "L" ? "LONG" : "SHORT";
@@ -309,7 +335,6 @@ function buildPlanForTf({ symbol, tf, candles, best, scoreThreshold }) {
         direction,
         candleCloseTime,
         score,
-        scoreLabel: "HARMONIC",
         levels: {
           entryLow: entryMid - tolerance,
           entryHigh: entryMid + tolerance,
@@ -331,9 +356,8 @@ function buildPlanForTf({ symbol, tf, candles, best, scoreThreshold }) {
       symbol,
       tf,
       direction,
-      playbook: "HARMONIC",
+      playbook: "INTRADAY",
       score,
-      scoreLabel: "HARMONIC",
       candleCloseTime,
       tolerance,
       levels: {
@@ -348,41 +372,12 @@ function buildPlanForTf({ symbol, tf, candles, best, scoreThreshold }) {
   };
 }
 
-function bestPatternFromCandles(candles) {
-  const pivots = detectPivots(candles, PIVOT_TRAILING_BARS);
-  if (pivots.length < 5) return null;
-
-  const window = pivots.slice(-5);
-  const [X, A, B, C, D] = window;
-
-  if (!X || !A || !B || !C || !D) return null;
-
-  const ratios = ratiosFromPoints(window);
-  if (!ratios) return null;
-
-  let best = null;
-  for (const pattern of PATTERN_DEFS) {
-    const { score } = scorePattern(ratios, pattern);
-    if (!best || score > best.score) {
-      best = { pattern, score };
-    }
-  }
-
-  if (!best) return null;
-
-  return {
-    ...best,
-    points: { X, A, B, C, D },
-    ratios
-  };
-}
-
 export async function runPremiumScan({ symbol, tfs, pipeline, env, scoreThreshold = 80 } = {}) {
   const sym = String(symbol || "").trim().toUpperCase();
   const requestedTfs = uniqueValidTfs(Array.isArray(tfs) ? tfs : []);
 
   if (!sym || !requestedTfs.length || !pipeline) {
-    return { intradayPlans: [], swingSignal: null };
+    return { intradayPlans: [], swingSignal: null, tfResults: [], minCandles: MIN_CANDLES };
   }
 
   try {
@@ -399,27 +394,65 @@ export async function runPremiumScan({ symbol, tfs, pipeline, env, scoreThreshol
 
   const intradayPlans = [];
   let swingSignal = null;
+  const tfResults = [];
 
   for (const tf of requestedTfs) {
     const candles = pipeline?.klines?.getCandles?.(sym, tf) || [];
-    if (!Array.isArray(candles) || candles.length < MIN_CANDLES) continue;
+    if (!Array.isArray(candles) || candles.length < MIN_CANDLES) {
+      tfResults.push({ tf, ok: false, reasonCode: "WARMUP" });
+      continue;
+    }
 
-    const best = bestPatternFromCandles(candles);
-    if (!best) continue;
+    const pivots = detectPivots(candles, PIVOT_TRAILING_BARS);
+    if (pivots.length < 5) {
+      tfResults.push({ tf, ok: false, reasonCode: "PIVOT_NOT_READY" });
+      continue;
+    }
+
+    const window = pivots.slice(-5);
+    const [X, A, B, C, D] = window;
+    if (!X || !A || !B || !C || !D) {
+      tfResults.push({ tf, ok: false, reasonCode: "PIVOT_NOT_READY" });
+      continue;
+    }
+
+    const ratios = ratiosFromPoints(window);
+    if (!ratios) {
+      tfResults.push({ tf, ok: false, reasonCode: "RATIO_NO_MATCH" });
+      continue;
+    }
+
+    const { best, matchCount } = bestPatternFromRatios(ratios);
+    const bestScore = Number(best?.score || 0);
+
+    if (!matchCount) {
+      tfResults.push({ tf, ok: false, reasonCode: "RATIO_NO_MATCH", bestScore });
+      continue;
+    }
+
+    if (!(bestScore >= Number(scoreThreshold))) {
+      tfResults.push({ tf, ok: false, reasonCode: "LOW_SCORE", bestScore });
+      continue;
+    }
 
     const built = buildPlanForTf({
       symbol: sym,
       tf,
       candles,
-      best,
+      best: { ...best, points: { X, A, B, C, D }, ratios },
       scoreThreshold
     });
 
-    if (!built) continue;
+    if (!built) {
+      tfResults.push({ tf, ok: false, reasonCode: "UNSPECIFIED", bestScore });
+      continue;
+    }
+
+    tfResults.push({ tf, ok: true, score: bestScore });
 
     if (built.kind === "SWING") swingSignal = built.signal;
     if (built.kind === "INTRADAY") intradayPlans.push(built.plan);
   }
 
-  return { intradayPlans, swingSignal };
+  return { intradayPlans, swingSignal, tfResults, minCandles: MIN_CANDLES };
 }

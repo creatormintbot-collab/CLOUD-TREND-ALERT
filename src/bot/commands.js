@@ -17,9 +17,11 @@ import {
   isPremiumActive as isSubscriptionPremiumActive,
   getExpiry as getSubscriptionExpiry
 } from "../storage/subscriptionsRepo.js";
-import { runPremiumScan } from "../scan/premiumScan.js";
+import { runPremiumScan, PREMIUM_MIN_CANDLES } from "../scan/premiumScan.js";
 import { INTRADAY_COOLDOWN_MINUTES } from "../config/constants.js";
 import { logger } from "../logger/logger.js";
+import { cooldownCard, discoveryTopCard, noSetupCard } from "./cards/premium/index.js";
+import { get as getScanCooldown, set as setScanCooldown } from "../storage/scanCooldownRepo.js";
 
 function mapIntradayPlanToSignal(plan = {}) {
   const entry = Number(plan?.levels?.entry ?? plan?.entry);
@@ -753,6 +755,166 @@ function formatDmScanLimitReached({ used, max }) {
   ].join("\n");
 }
 
+const PREMIUM_DM_TFS = ["15m", "30m", "1h", "4h"];
+const PREMIUM_DM_SCORE_THRESHOLD = 80;
+const PREMIUM_DM_DISCOVERY_COOLDOWN_SEC = 180;
+const PREMIUM_DM_TARGETED_COOLDOWN_SEC = 45;
+const PREMIUM_DM_DISCOVERY_UNIVERSE_SIZE = 50;
+const PREMIUM_DM_DISCOVERY_CONCURRENCY = 5;
+const PREMIUM_DM_DISCOVERY_TIMEOUT_MS = 12000;
+const PREMIUM_DM_DISCOVERY_CACHE_TTL_MS = 90000;
+const PREMIUM_DM_MODE_DISCOVERY = "DISCOVERY";
+const PREMIUM_DM_MODE_TARGETED = "TARGETED";
+
+function extractReasonCodes(tfResults) {
+  const out = [];
+  for (const row of Array.isArray(tfResults) ? tfResults : []) {
+    if (!row || row.ok === true) continue;
+    const code = String(row.reasonCode || "").toUpperCase();
+    if (!code) continue;
+    out.push(code);
+  }
+  return out;
+}
+
+function pickBestPremiumCandidate(premiumRes) {
+  const candidates = [];
+  const intraday = Array.isArray(premiumRes?.intradayPlans) ? premiumRes.intradayPlans : [];
+  for (const plan of intraday) {
+    const score = Number(plan?.score);
+    if (!Number.isFinite(score)) continue;
+    candidates.push({
+      symbol: String(plan?.symbol || "").toUpperCase(),
+      tf: String(plan?.tf || "").toLowerCase(),
+      score
+    });
+  }
+
+  const swing = premiumRes?.swingSignal;
+  if (swing?.ok) {
+    const score = Number(swing?.score);
+    if (Number.isFinite(score)) {
+      candidates.push({
+        symbol: String(swing?.symbol || "").toUpperCase(),
+        tf: String(swing?.tf || "").toLowerCase(),
+        score
+      });
+    }
+  }
+
+  if (!candidates.length) return null;
+  candidates.sort((a, b) => (b.score || 0) - (a.score || 0));
+  const best = candidates[0];
+  return best ? { ...best, score: Math.round(best.score || 0) } : null;
+}
+
+async function resolveDiscoverySymbols(pipeline, universeSize) {
+  const size = Math.max(0, Math.floor(Number(universeSize || 0)));
+  if (!pipeline || size <= 0) return [];
+
+  const out = [];
+  const seen = new Set();
+
+  const addSymbol = (raw) => {
+    const base = (raw && typeof raw === "object") ? raw.symbol : raw;
+    const sym = String(base || "").toUpperCase();
+    if (!sym || seen.has(sym)) return true;
+    seen.add(sym);
+    out.push(sym);
+    return out.length < size;
+  };
+
+  let volumeRows = [];
+  try {
+    if (typeof pipeline.topVolumeCached === "function") {
+      const rows = await pipeline.topVolumeCached(size);
+      if (Array.isArray(rows)) volumeRows = rows;
+    }
+  } catch {}
+
+  for (const raw of volumeRows) {
+    if (!addSymbol(raw)) return out;
+  }
+
+  let universeSymbols = [];
+  try {
+    if (typeof pipeline?.universe?.symbolsForScan === "function") universeSymbols = pipeline.universe.symbolsForScan();
+    else if (typeof pipeline?.universe?.symbols === "function") universeSymbols = pipeline.universe.symbols();
+  } catch {}
+
+  for (const raw of Array.isArray(universeSymbols) ? universeSymbols : []) {
+    if (!addSymbol(raw)) break;
+  }
+
+  return out;
+}
+
+async function runPremiumDiscoveryScan({ pipeline, env, tfs, scoreThreshold, universeSize, concurrency, timeoutMs }) {
+  const symbols = await resolveDiscoverySymbols(pipeline, universeSize);
+  const scannedCount = symbols.length;
+  const setups = [];
+  const reasonCodes = new Set();
+  const startedAt = Date.now();
+  let timedOut = false;
+  let index = 0;
+
+  if (!symbols.length) {
+    return { scannedCount: 0, setups: [], reasonCodes: ["UNSPECIFIED"], timedOut: false, elapsedMs: 0 };
+  }
+
+  const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  const runWorker = async () => {
+    while (true) {
+      const i = index++;
+      if (i >= symbols.length) return;
+      if (timedOut) return;
+      if (Date.now() - startedAt > timeoutMs) { timedOut = true; return; }
+
+      const sym = symbols[i];
+      let premiumRes = null;
+      try {
+        premiumRes = await runPremiumScan({
+          symbol: sym,
+          tfs,
+          pipeline,
+          env,
+          scoreThreshold
+        });
+      } catch {
+        premiumRes = null;
+      }
+
+      if (timedOut) return;
+      if (Date.now() - startedAt > timeoutMs) { timedOut = true; return; }
+
+      const candidate = pickBestPremiumCandidate(premiumRes);
+      if (candidate && Number(candidate.score) >= Number(scoreThreshold)) {
+        setups.push(candidate);
+      } else {
+        const codes = extractReasonCodes(premiumRes?.tfResults);
+        for (const code of codes) reasonCodes.add(code);
+      }
+    }
+  };
+
+  const workerCount = Math.max(1, Math.min(Number(concurrency) || 1, symbols.length));
+  const workers = Array.from({ length: workerCount }, () => runWorker());
+  const timeoutPromise = delay(timeoutMs).then(() => { timedOut = true; });
+
+  await Promise.race([Promise.allSettled(workers), timeoutPromise]);
+
+  setups.sort((a, b) => (b.score || 0) - (a.score || 0));
+
+  return {
+    scannedCount,
+    setups: setups.slice(0, 3),
+    reasonCodes: Array.from(reasonCodes),
+    timedOut,
+    elapsedMs: Date.now() - startedAt
+  };
+}
+
 export class Commands {
   constructor({ bot, sender, progressUi, pipeline, stateRepo, positionsRepo, signalsRepo, env, dmSubscribersRepo = null }) {
     this.bot = bot;
@@ -764,6 +926,7 @@ export class Commands {
     this.signalsRepo = signalsRepo;
     this.env = env;
     this.dmSubscribersRepo = dmSubscribersRepo;
+    this._premiumDiscoveryCache = new Map();
     this._bound = false;
   }
 
@@ -1574,7 +1737,7 @@ export class Commands {
 
       if (isDmChat && isPremium && symbolArg) {
         if (args.length <= 1) {
-          requestedPremiumTfs = ["15m", "30m", "1h", "4h"];
+          requestedPremiumTfs = PREMIUM_DM_TFS.slice();
           tfArg = null;
         } else {
           const parsed = args.slice(1).map((tf) => String(tf || "").toLowerCase());
@@ -1645,39 +1808,150 @@ export class Commands {
       }
 
       const premiumManualDmScan = isDmChat && isPremium && !!symbolArg;
-      if (premiumManualDmScan) {
-        const normalizeTfKey = (tfs) => {
-          const order = ["15m", "30m", "1h", "4h"];
-          const uniq = Array.from(new Set((Array.isArray(tfs) ? tfs : [])
-            .map((tf) => String(tf || "").toLowerCase())
-            .filter(Boolean)));
-          uniq.sort((a, b) => {
-            const ai = order.indexOf(a);
-            const bi = order.indexOf(b);
-            if (ai === -1 && bi === -1) return a.localeCompare(b);
-            if (ai === -1) return 1;
-            if (bi === -1) return -1;
-            return ai - bi;
+      const premiumDiscovery = isDmChat && isPremium && !symbolArg;
+      const premiumMode = premiumDiscovery
+        ? PREMIUM_DM_MODE_DISCOVERY
+        : (premiumManualDmScan ? PREMIUM_DM_MODE_TARGETED : "");
+
+      if (premiumMode) {
+        const nowMs = Date.now();
+        const cooldownSeconds = premiumMode === PREMIUM_DM_MODE_DISCOVERY
+          ? PREMIUM_DM_DISCOVERY_COOLDOWN_SEC
+          : PREMIUM_DM_TARGETED_COOLDOWN_SEC;
+        const lastAt = await getScanCooldown(String(userId), premiumMode);
+        const remainingMs = Number(cooldownSeconds * 1000) - (nowMs - Number(lastAt || 0));
+
+        if (Number.isFinite(remainingMs) && remainingMs > 0) {
+          const retryInSeconds = Math.max(1, Math.ceil(remainingMs / 1000));
+          try {
+            await this.signalsRepo.logScanThrottled({
+              chatId,
+              query: {
+                symbol: premiumDiscovery ? null : (symbolArg || null),
+                tf: premiumDiscovery ? null : (tfArg || null),
+                raw: raw || ""
+              }
+            });
+          } catch {}
+          logger.info("[scan] premium_dm_throttled", {
+            mode: premiumMode,
+            retryInSeconds
           });
-          return uniq.join(",");
-        };
-        const tfKey = (args.length <= 1)
-          ? "harmonic"
-          : (normalizeTfKey(requestedPremiumTfs) || "harmonic");
-        const throttleKey = `dm:${String(userId)}:scan:${String(symbolArg || "").toUpperCase()}:${tfKey}`;
-        const canSend = (typeof this.stateRepo?.canSendSymbol === "function")
-          ? this.stateRepo.canSendSymbol(throttleKey, 0.75)
-          : true;
-        if (!canSend) {
-          await this.sender.sendText(chatId, `⏳ Cooldown 45s. Please wait before scanning ${String(symbolArg || "").toUpperCase()} again.`);
+          await this.sender.sendText(chatId, cooldownCard({
+            mode: premiumMode,
+            retryInSeconds
+          }));
           return;
         }
+
         try {
-          if (typeof this.stateRepo?.markSent === "function") {
-            this.stateRepo.markSent(throttleKey);
-            await this.stateRepo.flush();
-          }
+          await setScanCooldown(String(userId), premiumMode, nowMs);
         } catch {}
+      }
+
+      if (premiumDiscovery) {
+        const cacheKey = [
+          `tfs=${PREMIUM_DM_TFS.join(",")}`,
+          `score=${PREMIUM_DM_SCORE_THRESHOLD}`,
+          `n=${PREMIUM_DM_DISCOVERY_UNIVERSE_SIZE}`
+        ].join("|");
+
+        const runDiscovery = async () => {
+          const nowMs = Date.now();
+          const cached = this._premiumDiscoveryCache.get(cacheKey);
+          if (cached && Number(cached.expiresAt || 0) > nowMs) {
+            return { ...cached.value, cached: true };
+          }
+
+          if (cached) this._premiumDiscoveryCache.delete(cacheKey);
+
+          const res = await runPremiumDiscoveryScan({
+            pipeline: this.pipeline,
+            env: this.env,
+            tfs: PREMIUM_DM_TFS,
+            scoreThreshold: PREMIUM_DM_SCORE_THRESHOLD,
+            universeSize: PREMIUM_DM_DISCOVERY_UNIVERSE_SIZE,
+            concurrency: PREMIUM_DM_DISCOVERY_CONCURRENCY,
+            timeoutMs: PREMIUM_DM_DISCOVERY_TIMEOUT_MS
+          });
+
+          this._premiumDiscoveryCache.set(cacheKey, {
+            expiresAt: nowMs + PREMIUM_DM_DISCOVERY_CACHE_TTL_MS,
+            value: res
+          });
+
+          return { ...res, cached: false };
+        };
+
+        const progress = await this.progressUi.run(
+          { chatId, userId },
+          runDiscovery,
+          { okText: null, noSignalText: null }
+        );
+
+        if (progress.kind !== "OK") return;
+
+        const discoveryRes = progress.result || {};
+        const topSetups = Array.isArray(discoveryRes.setups) ? discoveryRes.setups : [];
+        const scannedCount = Number(discoveryRes.scannedCount || PREMIUM_DM_DISCOVERY_UNIVERSE_SIZE);
+        const reasonCodes = Array.isArray(discoveryRes.reasonCodes) ? discoveryRes.reasonCodes : [];
+        const elapsedMs = Number(discoveryRes.elapsedMs || 0);
+        const cached = !!discoveryRes.cached;
+        const timedOut = !!discoveryRes.timedOut;
+
+        logger.info("[scan] premium_dm_discovery", {
+          scannedCount,
+          found: topSetups.length,
+          cached,
+          timedOut
+        });
+
+        let cardText = "";
+        if (topSetups.length) {
+          cardText = discoveryTopCard({
+            scannedCount,
+            timeframes: PREMIUM_DM_TFS,
+            scoreThreshold: PREMIUM_DM_SCORE_THRESHOLD,
+            setups: topSetups,
+            cooldownSeconds: PREMIUM_DM_DISCOVERY_COOLDOWN_SEC
+          });
+        } else {
+          const reasonList = reasonCodes.length ? reasonCodes : ["UNSPECIFIED"];
+          cardText = noSetupCard({
+            variant: "DISCOVERY",
+            scannedCount,
+            timeframes: PREMIUM_DM_TFS,
+            scoreThreshold: PREMIUM_DM_SCORE_THRESHOLD,
+            cooldownSeconds: PREMIUM_DM_DISCOVERY_COOLDOWN_SEC,
+            reasonCodes: reasonList,
+            minCandles: PREMIUM_MIN_CANDLES
+          });
+
+          const primaryReason = reasonList[0] || "UNSPECIFIED";
+          try {
+            await this.signalsRepo.logScanNoSignal({
+              chatId,
+              query: { symbol: null, tf: null, raw: "" },
+              elapsedMs,
+              meta: { reasonCode: primaryReason }
+            });
+          } catch {}
+
+          logger.info("[scan] premium_dm_no_setup", {
+            mode: PREMIUM_DM_MODE_DISCOVERY,
+            reasonCode: primaryReason
+          });
+        }
+
+        if (progress.messageId) {
+          try {
+            await this.sender.editText(chatId, progress.messageId, cardText);
+          } catch {}
+        } else {
+          await this.sender.sendText(chatId, cardText);
+        }
+
+        return;
       }
 
       const shouldApplyFreeDmQuota = isDmChat && !isPremium && !symbolArg;
@@ -1754,6 +2028,7 @@ export class Commands {
 
       const startedAt = Date.now();
       let out = null;
+      let premiumMeta = null;
       let secondaryPick = null;
       let intradayPlans = [];
       let rotationSwingCandidates = [];
@@ -1772,33 +2047,6 @@ export class Commands {
           const primary = swingList[0] || null;
           symbolUsed = primary?.symbol || intradayList[0]?.symbol || null;
 
-          if (isDmChat && isPremium) {
-            intradayPlans = [];
-            if (!symbolUsed) return null;
-
-            const premiumRes = await runPremiumScan({
-              symbol: symbolUsed,
-              tfs: ["15m", "30m", "1h", "4h"],
-              pipeline: this.pipeline,
-              env: this.env,
-              scoreThreshold: 80
-            });
-            const rawIntraday = Array.isArray(premiumRes?.intradayPlans) ? premiumRes.intradayPlans : [];
-            const swing = premiumRes?.swingSignal?.ok ? premiumRes.swingSignal : null;
-            if (rawIntraday.length || swing) {
-              if (rawIntraday.length > 1) rawIntraday.sort((a, b) => (b.score || 0) - (a.score || 0));
-              intradayPlans = rawIntraday.slice(0, 3);
-              return swing || (intradayPlans.length ? { ok: true, __intradayOnly: true } : null);
-            }
-
-            try {
-              console.info("[SCAN] premium_rotation_no_harmonic", JSON.stringify({ symbol: symbolUsed }));
-            } catch {
-              console.info("[SCAN] premium_rotation_no_harmonic");
-            }
-            return null;
-          }
-
           intradayPlans = intradayList;
           if (primary) return primary;
           if (intradayList.length) return { ok: true, __intradayOnly: true };
@@ -1814,34 +2062,26 @@ export class Commands {
             symbolUsed = symbolArg;
             const requestedTfs = Array.isArray(requestedPremiumTfs) && requestedPremiumTfs.length
               ? requestedPremiumTfs
-              : ["15m", "30m", "1h", "4h"];
+              : PREMIUM_DM_TFS;
 
             const premiumRes = await runPremiumScan({
               symbol: symbolArg,
               tfs: requestedTfs,
               pipeline: this.pipeline,
               env: this.env,
-              scoreThreshold: 80
+              scoreThreshold: PREMIUM_DM_SCORE_THRESHOLD
             });
 
+            premiumMeta = {
+              tfResults: Array.isArray(premiumRes?.tfResults) ? premiumRes.tfResults : [],
+              requestedTfs,
+              minCandles: Number(premiumRes?.minCandles || PREMIUM_MIN_CANDLES),
+              scoreThreshold: PREMIUM_DM_SCORE_THRESHOLD
+            };
+
             const harmonicPlans = Array.isArray(premiumRes?.intradayPlans) ? premiumRes.intradayPlans : [];
-            const harmonicByTf = new Set(harmonicPlans.map((p) => String(p?.tf || "").toLowerCase()).filter(Boolean));
-            const fallbackIntraday = [];
-            for (const tf of requestedTfs) {
-              if (isSwingTfLocal(tf)) continue;
-              const key = String(tf || "").toLowerCase();
-              if (harmonicByTf.has(key)) continue;
-              const intr = await this.pipeline.scanPairIntraday(symbolArg, tf);
-              if (intr?.ok) fallbackIntraday.push(intr);
-            }
-            intradayPlans = harmonicPlans.length ? [...harmonicPlans, ...fallbackIntraday] : fallbackIntraday;
-
-            let swing = premiumRes?.swingSignal?.ok ? premiumRes.swingSignal : null;
-            if (!swing && requestedTfs.some((tf) => isSwingTfLocal(tf))) {
-              const fallbackSwing = await this.pipeline.scanPairSwing(symbolArg);
-              if (fallbackSwing?.ok) swing = fallbackSwing;
-            }
-
+            intradayPlans = harmonicPlans;
+            const swing = premiumRes?.swingSignal?.ok ? premiumRes.swingSignal : null;
             res = swing || (intradayPlans.length ? { ok: true, __intradayOnly: true } : null);
             secondaryPick = null;
           } else if (symbolArg && !tfArg) {
@@ -1863,7 +2103,9 @@ export class Commands {
           }
 
           const elapsedMs = Date.now() - startedAt;
-          out = res ? { kind: "OK", result: res, elapsedMs } : { kind: "NO_SIGNAL", elapsedMs };
+          out = res
+            ? { kind: "OK", result: res, elapsedMs, premiumMeta }
+            : { kind: "NO_SIGNAL", elapsedMs, premiumMeta };
         } catch (e) {
           out = { kind: "ERROR", elapsedMs: Date.now() - startedAt, error: e };
         }
@@ -1880,16 +2122,61 @@ export class Commands {
       if (out.kind === "LOCKED") return;
 
       if (out.kind === "NO_SIGNAL") {
+        if (isDmChat && isPremium) {
+          const meta = out?.premiumMeta || {};
+          const requestedTfs = Array.isArray(meta.requestedTfs) && meta.requestedTfs.length
+            ? meta.requestedTfs
+            : (tfArg ? [tfArg] : PREMIUM_DM_TFS);
+          const tfResults = Array.isArray(meta.tfResults) ? meta.tfResults : [];
+          const reasonCodes = extractReasonCodes(tfResults);
+          const reasonList = reasonCodes.length ? reasonCodes : ["UNSPECIFIED"];
+          const primaryReason = reasonList[0] || "UNSPECIFIED";
+
+          const tfNoSetupList = tfResults.filter((r) => r && r.ok === false)
+            .map((r) => String(r.tf || "").toLowerCase())
+            .filter(Boolean);
+          const checkedTfs = tfNoSetupList.length ? tfNoSetupList : requestedTfs;
+
+          const isSingleTf = requestedTfs.length === 1;
+          const tfLabel = String(tfArg || requestedTfs[0] || "").toLowerCase();
+
+          const cardText = noSetupCard({
+            variant: isSingleTf ? "TARGETED_SINGLE" : "TARGETED_MULTI",
+            symbol: symbolUsed || symbolArg || "",
+            tf: tfLabel,
+            timeframes: requestedTfs,
+            tfNoSetupList: checkedTfs,
+            scoreThreshold: PREMIUM_DM_SCORE_THRESHOLD,
+            cooldownSeconds: PREMIUM_DM_TARGETED_COOLDOWN_SEC,
+            reasonCodes: reasonList,
+            minCandles: Number(meta.minCandles || PREMIUM_MIN_CANDLES)
+          });
+
+          try {
+            await this.signalsRepo.logScanNoSignal({
+              chatId,
+              query: { symbol: symbolUsed || null, tf: tfArg || null, raw: "" },
+              elapsedMs: out.elapsedMs,
+              meta: { reasonCode: primaryReason }
+            });
+          } catch {}
+
+          logger.info("[scan] premium_dm_no_setup", {
+            mode: PREMIUM_DM_MODE_TARGETED,
+            symbol: symbolUsed || symbolArg || null,
+            tf: tfArg || null,
+            reasonCode: primaryReason
+          });
+
+          await this.sender.sendText(chatId, cardText);
+          return;
+        }
+
         await this.signalsRepo.logScanNoSignal({
           chatId,
           query: { symbol: symbolUsed || null, tf: tfArg || null, raw: raw || "" },
           elapsedMs: out.elapsedMs
         });
-
-        if (isDmChat && isPremium) {
-          await this.sender.sendText(chatId, "No harmonic signal found.");
-          return;
-        }
 
         // explain (best-effort)
         try {
