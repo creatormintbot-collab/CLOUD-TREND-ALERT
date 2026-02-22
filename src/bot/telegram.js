@@ -12,7 +12,7 @@ export function startTelegram(token) {
   const bot = new TelegramBot(token, {
     polling: {
       autoStart: true,
-      interval: 500,
+      interval: 1000,
       params: { timeout: 30 }
     },
     request: {
@@ -45,18 +45,6 @@ export function startTelegram(token) {
       logger.error({ err }, "[telegram] getMe failed");
     });
 
-  // Ensure polling is started (autoStart should do this, but we guard for edge cases).
-  setTimeout(() => {
-    bot.startPolling()
-      .then(() => {
-        logger.info("[telegram] polling started");
-      })
-      .catch((err) => {
-        // Common benign case: polling already started
-        logger.warn({ err }, "[telegram] startPolling initial failed");
-      });
-  }, 0);
-
   // Lightweight command trace (helps diagnose 'bot not responding' cases)
   bot.on("message", (msg) => {
     const text = msg?.text;
@@ -72,6 +60,8 @@ export function startTelegram(token) {
   let backoffMs = 1_000;
   const backoffMax = 30_000;
   let restartTimer = null;
+  let restartInProgress = false;
+  let stopInProgress = false;
 
   const scheduleRestart = () => {
     if (restartTimer) return;
@@ -79,6 +69,17 @@ export function startTelegram(token) {
     const wait = backoffMs;
     restartTimer = setTimeout(() => {
       restartTimer = null;
+      if (restartInProgress) {
+        scheduleRestart();
+        return;
+      }
+      if (typeof bot.isPolling === "function" && bot.isPolling()) {
+        backoffMs = 1_000;
+        return;
+      }
+
+      restartInProgress = true;
+      let shouldRetry = false;
 
       bot.startPolling()
         .then(() => {
@@ -88,7 +89,11 @@ export function startTelegram(token) {
         .catch((e) => {
           logger.error({ err: e }, "[telegram] startPolling failed");
           backoffMs = Math.min(backoffMax, Math.floor(backoffMs * 1.7));
-          scheduleRestart();
+          shouldRetry = true;
+        })
+        .finally(() => {
+          restartInProgress = false;
+          if (shouldRetry) scheduleRestart();
         });
     }, wait);
 
@@ -106,10 +111,17 @@ export function startTelegram(token) {
       logger.error({ err }, "[telegram] polling_error");
     }
 
-    try {
-      await bot.stopPolling();
-    } catch (e) {
-      logger.warn({ err: e }, "[telegram] stopPolling failed");
+    if (!stopInProgress && !restartInProgress) {
+      stopInProgress = true;
+      try {
+        if (typeof bot.isPolling !== "function" || bot.isPolling()) {
+          await bot.stopPolling();
+        }
+      } catch (e) {
+        logger.warn({ err: e }, "[telegram] stopPolling failed");
+      } finally {
+        stopInProgress = false;
+      }
     }
 
     scheduleRestart();
